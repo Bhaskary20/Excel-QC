@@ -2,12 +2,18 @@
 __pycache__/
 *.pyc
 output/
-sample_data/*.xlsx
-!sample_data/.gitkeep
 .pytest_cache/
 *.log
 .coverage
 htmlcov/
+
+# This project exists to process confidential client data, so every Excel
+# workbook anywhere in the repo is presumed sensitive and ignored by
+# default. The only file ever meant to be committed is the blank template.
+*.xlsx
+*.xls
+!template/Format.xlsx
+!sample_data/.gitkeep
 
 # Excel lock files (created while a workbook is open in Excel)
 ~$*.xlsx

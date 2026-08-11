@@ -153,6 +153,25 @@ def test_not_applicable_excluded_from_completeness_denominator(cfg, tmp_path):
     assert run.workbook_summary.not_applicable_cells == 1
 
 
+def test_completeness_never_exceeds_100_percent_on_oversupply(cfg, tmp_path):
+    # H declares 2 agencies but L has 4 phone numbers -- the raw valid
+    # count must still be reported honestly, but completeness (a
+    # percentage) must never exceed 100%.
+    template_path = tmp_path / "template.xlsx"
+    response_path = tmp_path / "response.xlsx"
+    _write_workbook(template_path, [_full_row(**_BLANK_INPUT_COLUMNS)])
+    _write_workbook(response_path, [_full_row(
+        H="1. Agency One\n2. Agency Two",
+        L="1. 9876543210\n2. 9876543211\n3. 9876543212\n4. 9876543213",
+    )])
+
+    run = run_qc(str(template_path), str(response_path), cfg)
+
+    assert run.workbook_summary.overall_completeness <= 1.0
+    assert run.workbook_summary.total_valid_slots >= 4  # the raw L count is still honest
+    assert run.rows[0].completeness <= 1.0
+
+
 # ============================================================================
 # extra_response_rows: bounded to the data range, no false positives from
 # the title/header rows (regression: caught in manual smoke testing)

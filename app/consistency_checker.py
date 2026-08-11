@@ -222,7 +222,11 @@ def _check_consistency(per_column: dict[str, CellResult], n: int) -> list[Consis
     if n > 0:
         for letter in _SLOTTED_NON_ANCHOR:
             cell = per_column[letter]
-            if cell.missing_slots:
+            # NOT_APPLICABLE means the client explicitly said this column
+            # doesn't apply -- that's not the same finding as "forgot to
+            # fill some slots in", even though missing_slots is populated
+            # either way (parse_cell leaves slot_values empty for an NA cell).
+            if cell.missing_slots and cell.status != Status.NOT_APPLICABLE:
                 slots_desc = ", ".join(str(s) for s in cell.missing_slots)
                 findings.append(
                     ConsistencyFinding(
@@ -253,7 +257,10 @@ def _row_completeness(per_column: dict[str, CellResult], n: int) -> Optional[flo
     if n <= 0:
         return None
     slotted_letters = [c.letter for c in slotted_columns()]
-    total_valid = sum(per_column[letter].valid_count for letter in slotted_letters)
+    # Cap each column's contribution at n: a client who supplies more phone
+    # numbers than declared agencies has that column at 100%, not >100% --
+    # oversupply on one column must not inflate the row's overall figure.
+    total_valid = sum(min(per_column[letter].valid_count, n) for letter in slotted_letters)
     denominator = n * len(slotted_letters)
     return total_valid / denominator if denominator > 0 else None
 

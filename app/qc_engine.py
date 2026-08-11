@@ -41,6 +41,7 @@ def _build_workbook_summary(rows: list[RowResult]) -> WorkbookSummary:
     summary = WorkbookSummary(total_rows=len(rows))
     total_expected = 0
     total_valid = 0
+    total_valid_capped = 0  # for completeness only -- see comment below
 
     for row in rows:
         row_field = _ROW_STATUS_FIELD[row.status]
@@ -56,6 +57,12 @@ def _build_workbook_summary(rows: list[RowResult]) -> WorkbookSummary:
             if cell.expected_count is not None and cell.status != Status.NOT_APPLICABLE:
                 total_expected += cell.expected_count
                 total_valid += cell.valid_count
+                # total_valid_slots itself stays the honest raw count (how
+                # much real data exists); completeness is a percentage and
+                # must never exceed 100%, so a client who supplies more
+                # phone numbers than declared agencies has that column's
+                # contribution capped at expected_count here.
+                total_valid_capped += min(cell.valid_count, cell.expected_count)
             summary.total_missing_slots += cell.missing_count or 0
             summary.total_invalid_slots += cell.invalid_count
 
@@ -64,7 +71,7 @@ def _build_workbook_summary(rows: list[RowResult]) -> WorkbookSummary:
 
     summary.total_expected_slots = total_expected
     summary.total_valid_slots = total_valid
-    summary.overall_completeness = (total_valid / total_expected) if total_expected > 0 else None
+    summary.overall_completeness = (total_valid_capped / total_expected) if total_expected > 0 else None
     return summary
 
 
@@ -72,6 +79,7 @@ def _build_sheet_summary(rows: list[RowResult]) -> SheetSummary:
     summary = SheetSummary(sheet=SHEET_NAME, total_rows=len(rows))
     total_expected = 0
     total_valid = 0
+    total_valid_capped = 0  # for completeness only -- see _build_workbook_summary
 
     for row in rows:
         if row.status == Status.COMPLETE:
@@ -83,12 +91,13 @@ def _build_sheet_summary(rows: list[RowResult]) -> SheetSummary:
             if cell.expected_count is not None and cell.status != Status.NOT_APPLICABLE:
                 total_expected += cell.expected_count
                 total_valid += cell.valid_count
+                total_valid_capped += min(cell.valid_count, cell.expected_count)
             summary.missing_slots += cell.missing_count or 0
             summary.invalid_slots += cell.invalid_count
 
     summary.expected_slots = total_expected
     summary.valid_slots = total_valid
-    summary.completeness = (total_valid / total_expected) if total_expected > 0 else None
+    summary.completeness = (total_valid_capped / total_expected) if total_expected > 0 else None
     return summary
 
 

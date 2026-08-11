@@ -249,6 +249,16 @@ def test_row_completeness_formula(cfg):
     assert result.completeness == pytest.approx(total_valid / denominator)
 
 
+def test_row_completeness_never_exceeds_100_percent_on_oversupply(cfg):
+    # H declares 2 agencies, but L has 4 phone numbers -- oversupply on one
+    # column must not push the row's overall completeness above 100%.
+    result = _check(15, {"H": "1. Agency One\n2. Agency Two", "L": "9876543210\n9876543211\n9876543212\n9876543213"}, cfg)
+    assert result.n_contracts == 2
+    assert result.per_column["L"].valid_count == 4  # the raw count is still honest
+    assert result.completeness <= 1.0
+    assert result.completeness == pytest.approx(1.0)  # every other column fully valid too
+
+
 def test_row_completeness_is_none_when_n_is_zero(cfg):
     result = _check(15, {"H": ""}, cfg)
     assert result.completeness is None
@@ -270,6 +280,17 @@ def test_slot_count_mismatch_finding_present_for_partial_column(cfg):
 def test_no_slot_count_mismatch_when_fully_filled(cfg):
     result = _check(15, None, cfg)
     findings = [f for f in result.consistency_findings if f.kind == "slot_count_mismatch"]
+    assert findings == []
+
+
+def test_no_slot_count_mismatch_when_column_is_explicitly_na(cfg):
+    # A whole-cell N/A leaves missing_slots populated (no slots were ever
+    # parsed), but that's the client saying "doesn't apply", not "forgot
+    # to fill this in" -- must not produce a false slot_count_mismatch.
+    result = _check(15, {"L": "N/A"}, cfg)
+    assert result.per_column["L"].status == Status.NOT_APPLICABLE
+    assert result.per_column["L"].missing_slots  # still populated on the cell itself
+    findings = [f for f in result.consistency_findings if f.kind == "slot_count_mismatch" and f.column == "L"]
     assert findings == []
 
 
