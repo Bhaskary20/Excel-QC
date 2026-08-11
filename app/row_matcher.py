@@ -57,7 +57,7 @@ def _normalize_key(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip()).casefold()
 
 
-def _resolve_sheet(cells: list[CellRecord], preferred: str) -> Optional[str]:
+def resolve_sheet(cells: list[CellRecord], preferred: str) -> Optional[str]:
     sheets = {c.sheet for c in cells}
     if preferred in sheets:
         return preferred
@@ -119,8 +119,8 @@ def _build_row_match(
 
 
 def match_rows(template_cells: list[CellRecord], response_cells: list[CellRecord]) -> list[RowMatch]:
-    template_sheet = _resolve_sheet(template_cells, SHEET_NAME)
-    response_sheet = _resolve_sheet(response_cells, SHEET_NAME)
+    template_sheet = resolve_sheet(template_cells, SHEET_NAME)
+    response_sheet = resolve_sheet(response_cells, SHEET_NAME)
 
     template_index = _build_identity_index(template_cells, template_sheet)
     response_index = _build_identity_index(response_cells, response_sheet)

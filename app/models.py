@@ -171,7 +171,9 @@ class WorkbookSummary:
     complete_rows: int = 0
     partial_rows: int = 0
     missing_rows: int = 0
+    invalid_rows: int = 0
     review_rows: int = 0
+    not_applicable_rows: int = 0
     overall_completeness: Optional[float] = None
     total_consistency_findings: int = 0
 
