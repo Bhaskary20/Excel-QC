@@ -402,7 +402,7 @@ Phases C and D are pure string-in/verdict-out — build and test them with no Ex
 - [x] Phase C — `slot_parser.py` + tests
 - [x] Phase D — `validators.py` rewrite + tests
 - [x] Phase E — `row_matcher.py` + tests
-- [ ] Phase F — `response_parser.py` + `consistency_checker.py` + tests
+- [x] Phase F — `response_parser.py` + `consistency_checker.py` + tests
 - [ ] Phase G — `qc_engine.py` + tests
 - [ ] Phase H — `report_generator.py` + tests
 - [ ] Phase I — `main.py` CLI
