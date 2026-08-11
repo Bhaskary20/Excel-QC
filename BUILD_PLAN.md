@@ -397,7 +397,7 @@ Phases C and D are pure string-in/verdict-out — build and test them with no Ex
 - [x] `excel_reader.py` (+10 tests)
 
 **v2 build**
-- [ ] Phase A — `template_spec.py` + header-verification tripwire test
+- [x] Phase A — `template_spec.py` + header-verification tripwire test
 - [ ] Phase B — `models.py` rewrite
 - [ ] Phase C — `slot_parser.py` + tests
 - [ ] Phase D — `validators.py` rewrite + tests
