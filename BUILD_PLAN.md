@@ -317,15 +317,16 @@ The §5 tables at all three levels, plus aggregation.
 
 `QC_Report.xlsx`:
 
-1. **Summary** — run metadata + workbook totals + overall completeness
-2. **Row Analysis** — one row per plaza: S.No, Plaza Name, RO, PIU, N, row status, completeness, count of problem columns
-3. **Cell Analysis** — one row per (plaza × column): expected N, filled, valid, invalid, missing slot numbers, status, reason
-4. **Slot Analysis** — one row per individual value: plaza, column, slot #, value, VALID/INVALID, reason
-5. **Consistency Findings** — cross-column and date-chain problems, most severe first
+1. **Status** — the primary, human-facing sheet: RO | Plaza | PIU | Status | Remarks, matching the format of NHAI's own PIU-response trackers (`tests/Status UPSTF_*.xlsx`). Status is Full/Partial/No Response (data-derived, not a copy of the client's historical labels — see the "Report: add Status sheet" commit). Remarks groups the 13 input columns into ~10 plain-English labels plus J date-chain/window and duplicate-phone findings.
+2. **Summary** — run metadata + workbook totals + overall completeness
+3. **Row Analysis** — one row per plaza: S.No, Plaza Name, RO, PIU, N, row status, completeness, count of problem columns
+4. **Cell Analysis** — one row per (plaza × column): expected N, filled, valid, invalid, missing slot numbers, status, reason
+5. **Slot Analysis** — one row per individual value: plaza, column, slot #, value, VALID/INVALID, reason
+6. **Consistency Findings** — cross-column and date-chain problems, most severe first
 
 Status colour-coding, frozen headers, autofilter, real `0.0%` number formats. Honour `security.redact_in_reports`.
 
-**Done when:** opens in Excel with no repair prompt; all five sheets present; completeness sorts numerically.
+**Done when:** opens in Excel with no repair prompt; all six sheets present; completeness sorts numerically.
 
 ### Phase I — `main.py` CLI
 
@@ -419,8 +420,8 @@ Phases C and D are pure string-in/verdict-out — build and test them with no Ex
 
 Answer before the phase that depends on each. Don't guess.
 
-1. **Phase F — "add details below the provided fields" (Instructions note).** Does a client with 8 agencies add slots `7.` and `8.` *inside the same cell*, or *insert a new row* for the plaza? The plan currently assumes in-cell (slots grow past 6) and `row_matcher` tolerates inserted rows, so both are survivable — but if inserted rows are the norm, row-level aggregation needs to merge them per plaza. **This is the highest-impact unknown.**
-2. **Phase D — Plaza Type vocabulary.** Is `Public Funded / BOT / TOT / InvIT / MLFF` exhaustive, or are `HAM`, `EPC`, `BOT-Annuity` also valid? A wrong list turns valid answers into INVALID.
+1. ~~**Phase F — "add details below the provided fields" (Instructions note).**~~ **RESOLVED by real data (11.08.2026 UPSTF file):** in-cell, confirmed. MAUHARI has 7 agencies numbered `1.`-`7.` inside column H itself, no inserted row. The in-cell-growth assumption holds.
+2. ~~**Phase D — Plaza Type vocabulary.**~~ **RESOLVED by real data:** the 5-value list is exhaustive, but real responses overwhelmingly write the NHAI shorthand `PF` (72 of 115 rows) instead of spelling out "Public Funded" — `HAM` seen only as a parenthetical qualifier ("PF (HAM)"), never standalone. Added `pf`/`fp` as aliases (see "Fix: recognize PF/FP..." commit); no other abbreviations found in the real data.
 3. **Phase D — Contact number.** Strictly 10-digit Indian mobile, or should landlines with STD codes pass?
 4. **Phase G — severity of a broken date chain.** REVIEW (current assumption) or INVALID? It's a real data-quality defect but not a formatting error.
 5. **Phase E — blank/`-` Plaza Codes** (rows 25, 96, 104, 105). Will these be filled in the response, or stay as-is? Currently they're simply not used as keys.
