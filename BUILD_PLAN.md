@@ -404,7 +404,7 @@ Phases C and D are pure string-in/verdict-out — build and test them with no Ex
 - [x] Phase E — `row_matcher.py` + tests
 - [x] Phase F — `response_parser.py` + `consistency_checker.py` + tests
 - [x] Phase G — `qc_engine.py` + tests
-- [ ] Phase H — `report_generator.py` + tests
+- [x] Phase H — `report_generator.py` + tests
 - [ ] Phase I — `main.py` CLI
 - [ ] Phase J — synthetic responses + full suite
 - [ ] Phase K — hardening + README

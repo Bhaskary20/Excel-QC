@@ -27,7 +27,7 @@ from app.template_spec import CONTRACT_WINDOW, SHEET_NAME, get_column, input_col
 # (nothing offered), which is worse than REVIEW (uncertain), which is
 # worse than PARTIAL. COMPLETE and NOT_APPLICABLE both mean "nothing to
 # flag here" and share the lowest severity.
-_STATUS_SEVERITY: dict[Status, int] = {
+STATUS_SEVERITY: dict[Status, int] = {
     Status.COMPLETE: 0,
     Status.NOT_APPLICABLE: 0,
     Status.PARTIAL: 1,
@@ -239,9 +239,9 @@ def _check_consistency(per_column: dict[str, CellResult], n: int) -> list[Consis
 
 
 def _row_status(per_column: dict[str, CellResult], identity_mismatches: list[str]) -> Status:
-    worst = max(per_column.values(), key=lambda r: _STATUS_SEVERITY[r.status]).status
+    worst = max(per_column.values(), key=lambda r: STATUS_SEVERITY[r.status]).status
     if identity_mismatches:
-        return max([worst, Status.REVIEW], key=lambda s: _STATUS_SEVERITY[s])
+        return max([worst, Status.REVIEW], key=lambda s: STATUS_SEVERITY[s])
     return worst
 
 
