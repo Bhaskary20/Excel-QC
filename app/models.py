@@ -108,8 +108,10 @@ TYPE_REGISTRY: dict[FieldType, TypeProfile] = {
         type=FieldType.AMOUNT,
         label_keywords=["amount", "compensation", "cost", "value", "price", "payment", "rs", "inr"],
         label_patterns=[r"\b(amount|compensation|cost|value|price|payment)\b|₹|\brs\.?\b|\binr\b"],
-        allowed_separators=["\n", ";", "|"],
-        forbidden_separators=[",", "/", "."],
+        # "," is allowed but only ever used via value_splitter's digit-guard,
+        # so "₹2,50,000" (a single grouped amount) never gets exploded.
+        allowed_separators=["\n", ";", "|", ","],
+        forbidden_separators=["/", "."],
         plural_hint=True,
     ),
     FieldType.DATE: TypeProfile(

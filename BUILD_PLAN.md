@@ -402,7 +402,7 @@ Get `allowed_separators` / `forbidden_separators` from `TYPE_REGISTRY[field_type
 |---|---|---|---|
 | PHONE | `\n` `;` `,` `\|` `/` | — | digits can't contain these |
 | EMAIL | `\n` `;` `,` `\|` | `/` | — |
-| AMOUNT | `\n` `;` `\|` | `,` `/` `.` | `,` only via the digit-guard rule below |
+| AMOUNT | `\n` `;` `\|` `,` | `/` `.` | `,` is allowed but only ever splits via the digit-guard rule below, so `₹2,50,000` stays one token |
 | DATE | `\n` `;` `,` `\|` | `/` `-` `.` | `10/08/2026`, `10-08-2026` |
 | NAME | `\n` `;` `\|` `,` | `/` | `,` allowed — names rarely contain commas |
 | ADDRESS | `\n` `;` `\|` | `,` `/` | **addresses are full of commas** |
@@ -1034,10 +1034,10 @@ Phases 3–6 are independently testable with plain strings — no Excel needed. 
 - [x] Phase 0 — config.py + logging_utils.py
 - [x] Phase 1 — excel_reader.py
 - [x] Phase 2 — models.py + TYPE_REGISTRY
-- [ ] Phase 3 — value_splitter.py + tests
-- [ ] Phase 4 — validators.py + tests
-- [ ] Phase 5 — field_type_detector.py + tests
-- [ ] Phase 6 — expected_count_detector.py + tests
+- [x] Phase 3 — value_splitter.py + tests
+- [x] Phase 4 — validators.py + tests
+- [x] Phase 5 — field_type_detector.py + tests
+- [x] Phase 6 — expected_count_detector.py + tests
 
 **Wiring**
 - [ ] Phase 7 — template_analyzer.py

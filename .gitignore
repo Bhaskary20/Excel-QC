@@ -8,3 +8,7 @@ sample_data/*.xlsx
 *.log
 .coverage
 htmlcov/
+
+# Excel lock files (created while a workbook is open in Excel)
+~$*.xlsx
+~$*.xls
