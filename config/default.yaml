@@ -1,0 +1,71 @@
+# ============================================================================
+# Excel Response Quality Checker - default configuration
+# ============================================================================
+
+# ---- AI / semantic layer -------------------------------------------------
+ai:
+  enabled: false            # MUST stay false until Phase 15 is proven
+  provider: none             # none | bge | ollama
+  min_confidence_to_use: 0.75
+
+# ---- Expected count detection -------------------------------------------
+expected_count:
+  # When nothing at all suggests a count, do we assume 1 or return UNKNOWN?
+  assume_single_when_unknown: false
+  min_confidence_to_accept: 0.60
+  scan_radius: 3             # how many cells up/left to scan for instructions
+  max_sane_count: 500        # a parsed count above this is rejected as a false positive
+
+# ---- Status rules --------------------------------------------------------
+status:
+  oversupply_is_review: false   # D > E  -> COMPLETE (false) or REVIEW (true)
+  treat_blank_optional_as: MISSING   # MISSING | NOT_APPLICABLE
+  na_tokens:
+    - "n/a"
+    - "na"
+    - "not applicable"
+    - "nil"
+    - "none"
+    - "-"
+    - "--"
+  low_confidence_review_threshold: 0.50   # below this, upgrade non-MISSING statuses to REVIEW
+
+# ---- Parsing -------------------------------------------------------------
+parsing:
+  max_values_per_cell: 500       # guardrail against pathological cells
+  strip_enumeration: true        # remove "1." "1)" "(1)" "-" prefixes
+  duplicates_are_invalid: true   # identical normalized values beyond the first are marked invalid
+
+# ---- Validation ------------------------------------------------------------
+validation:
+  phone:
+    country: IN
+    allowed_lengths: [10]
+    allow_country_code: true      # +91 / 0091 / 91 prefix
+    allowed_first_digits: ["6", "7", "8", "9"]
+  amount:
+    currency_symbols: ["₹", "Rs.", "Rs", "INR", "inr"]
+    allow_indian_grouping: true   # 2,50,000
+    allow_negative: false
+  date:
+    formats:
+      - "%d/%m/%Y"
+      - "%d-%m-%Y"
+      - "%Y-%m-%d"
+      - "%d.%m.%Y"
+      - "%d %b %Y"
+      - "%d %B %Y"
+    dayfirst: true
+  name:
+    min_length: 2
+    max_length: 80
+
+# ---- Security --------------------------------------------------------------
+security:
+  log_cell_values: false        # NEVER set true outside local debugging
+  redact_in_reports: false      # if true, Sheet 3 shows masked values
+
+# ---- Report ------------------------------------------------------------
+report:
+  freeze_header_row: true
+  autofilter: true

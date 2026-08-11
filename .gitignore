@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+output/
+sample_data/*.xlsx
+!sample_data/.gitkeep
+.pytest_cache/
+*.log
+.coverage
+htmlcov/
