@@ -19,7 +19,7 @@ that could drift out of sync.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from typing import Optional
@@ -66,6 +66,10 @@ class ColumnSpec:
     scaffold_raw: Optional[str] = None  # verbatim pre-filled text, slotted columns only
     composite_components: tuple[str, ...] = ()  # F only
     enum_values: tuple[str, ...] = ()  # G, I only
+    # canonical enum value -> alternate phrasings that should still match it,
+    # e.g. I's "3 months" alone (no "EQ" prefix) -> "EQ (3 months)". Only I
+    # needs this; G's values are already distinct standalone words.
+    enum_aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 _SCAFFOLD_BLANK = "  1. \n  2. \n  3.\n  4. \n  5.\n  6."
@@ -121,6 +125,10 @@ COLUMNS: dict[str, ColumnSpec] = {
         slotted=True, required=True,
         scaffold_raw=_SCAFFOLD_BLANK,
         enum_values=("EQ (3 months)", "Regular (1 year)"),
+        enum_aliases={
+            "EQ (3 months)": ("eq", "3 month", "3months"),
+            "Regular (1 year)": ("regular", "1 year", "1year", "annual"),
+        },
     ),
     "J": ColumnSpec(
         letter="J", index=10, header="Contract Start & End date with extension (01/01/2021 - 14/01/2026)",

@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Callable, Optional
 
 from app.config import Config
-from app.template_spec import SHEET_NAME, ValueType
+from app.template_spec import SHEET_NAME, ColumnSpec, ValueType
 
 
 class Status(str, Enum):
@@ -45,19 +45,23 @@ class ValueVerdict:
     # NEVER put the raw client value in `reason` -- it lands directly in QC_Report.xlsx.
 
 
-def _validator_not_implemented(value: str, cfg: "Config") -> ValueVerdict:
+def _validator_not_implemented(value: str, cfg: Config, spec: ColumnSpec) -> ValueVerdict:
     text = value.strip()
     if text:
         return ValueVerdict(is_valid=True, normalized=text, reason="")
     return ValueVerdict(is_valid=False, normalized=None, reason="empty value")
 
 
-VALIDATOR_REGISTRY: dict[ValueType, Callable[[str, "Config"], ValueVerdict]] = {
+# Every validator takes (value, cfg, spec) -- spec is required even for
+# validators that ignore it, so callers (response_parser, Phase F) never
+# need to know which types need column-specific data (G/I share ENUM but
+# have different valid values; H/N/P/S share TEXT but S is optional).
+VALIDATOR_REGISTRY: dict[ValueType, Callable[[str, Config, ColumnSpec], ValueVerdict]] = {
     value_type: _validator_not_implemented for value_type in ValueType
 }
 
 
-def get_validator(value_type: ValueType) -> Callable[[str, "Config"], ValueVerdict]:
+def get_validator(value_type: ValueType) -> Callable[[str, Config, ColumnSpec], ValueVerdict]:
     return VALIDATOR_REGISTRY[value_type]
 
 

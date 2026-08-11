@@ -20,7 +20,7 @@ from app.models import (
     WorkbookSummary,
     get_validator,
 )
-from app.template_spec import SHEET_NAME, ValueType
+from app.template_spec import SHEET_NAME, ValueType, get_column
 
 
 def test_every_value_type_has_a_registry_entry():
@@ -33,13 +33,17 @@ def test_get_validator_resolves_every_type():
         assert callable(get_validator(value_type))
 
 
-def test_placeholder_validator_accepts_nonempty_rejects_empty():
+def test_registered_validator_accepts_nonempty_rejects_blank():
+    # Whatever's currently registered for PHONE (placeholder pre-Phase D,
+    # real validator after) must agree on these two unambiguous cases.
     cfg = load_config()
     validator = get_validator(ValueType.PHONE)
-    ok = validator("9876543210", cfg)
+    spec = get_column("L")  # Contact of Toll Manager -- the real PHONE column
+
+    ok = validator("9876543210", cfg, spec)
     assert ok.is_valid is True
 
-    blank = validator("   ", cfg)
+    blank = validator("   ", cfg, spec)
     assert blank.is_valid is False
 
 
