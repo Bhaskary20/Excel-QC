@@ -41,7 +41,7 @@ _FULL_ROW_DEFAULTS = {
     "H": "1. Agency One\n2. Agency Two\n3. Agency Three\n4. Agency Four",
     "I": "1. EQ (3 months)\n2. Regular (1 year)\n3. EQ (3 months)\n4. Regular (1 year)",
     "J": (
-        "1. 10/08/2021 - 10/11/2021\n2. 10/11/2021 - 10/11/2022\n"
+        "1. 01/01/2021 - 10/11/2021\n2. 10/11/2021 - 10/11/2022\n"
         "3. 10/11/2022 - 10/02/2023\n4. 10/02/2023 - 14/01/2026"
     ),
     "K": "1. Rahul Sharma\n2. Amit Kumar\n3. Suresh Babu\n4. Vijay Singh",
@@ -208,6 +208,31 @@ def test_row_status_stays_worse_than_review_if_already_worse(cfg):
         15, {"L": "1. abc\n2. def\n3. ghi\n4. jkl"}, cfg,
         identity_mismatches=["Plaza Name: expected 'SEHATGANJ', got 'X'"],
     )
+    assert result.status == Status.INVALID
+
+
+def test_row_status_escalates_to_review_on_consistency_finding(cfg):
+    # L is only PARTIAL on its own (cell severity 1), but a genuinely
+    # missing slot also produces a slot_count_mismatch finding (REVIEW,
+    # severity 2) -- the row must reflect the finding's severity, not just
+    # the worst individual cell's, or the tool's central purpose (surfacing
+    # exactly this kind of gap) would be invisible at the row level.
+    result = _check(15, {"L": "9876543210\n9876543211"}, cfg)  # 2 of 4 phones
+    assert result.per_column["L"].status == Status.PARTIAL
+    assert any(f.kind == "slot_count_mismatch" for f in result.consistency_findings)
+    assert result.status == Status.REVIEW
+
+
+def test_row_status_review_from_finding_does_not_downgrade_worse_cell_status(cfg):
+    # If some OTHER cell is already INVALID (severity 3), a REVIEW-level
+    # finding elsewhere must not pull the row status back down to REVIEW.
+    result = _check(
+        15,
+        {"K": "1. 123\n2. 456\n3. 789\n4. 000", "L": "9876543210\n9876543211"},
+        cfg,
+    )
+    assert result.per_column["K"].status == Status.INVALID
+    assert any(f.kind == "slot_count_mismatch" for f in result.consistency_findings)
     assert result.status == Status.INVALID
 
 

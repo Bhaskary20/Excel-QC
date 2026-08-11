@@ -29,7 +29,7 @@ _FULL_ROW = {
     "G": "BOT",
     "H": "1. Agency One\n2. Agency Two",
     "I": "1. EQ (3 months)\n2. Regular (1 year)",
-    "J": "1. 10/08/2021 - 10/11/2021\n2. 10/11/2021 - 14/01/2026",
+    "J": "1. 01/01/2021 - 10/11/2021\n2. 10/11/2021 - 14/01/2026",
     "K": "1. Rahul Sharma\n2. Amit Kumar",
     "L": "1. 9876543210\n2. 9876543211",
     "M": "1. Toll Plaza Road, Bhopal\n2. Toll Plaza Road, Bhopal",
@@ -103,7 +103,10 @@ def test_aggregation_across_mixed_rows(cfg, tmp_path):
     response_path = tmp_path / "response.xlsx"
 
     row1 = _full_row(A="1", B="111111", C="ALPHA")  # fully correct
-    row2 = _full_row(A="2", B="222222", C="BETA", L="9876543210")  # only 1 of 2 phones -> PARTIAL
+    # Only 1 of 2 phones -- a genuinely missing slot triggers a
+    # slot_count_mismatch finding, which escalates the row to REVIEW (the
+    # tool's central purpose is surfacing exactly this), not just PARTIAL.
+    row2 = _full_row(A="2", B="222222", C="BETA", L="9876543210")
     row3 = _full_row(A="3", B="333333", C="GAMMA", **_BLANK_INPUT_COLUMNS)  # untouched -> MISSING
 
     template_rows = [
@@ -118,12 +121,13 @@ def test_aggregation_across_mixed_rows(cfg, tmp_path):
 
     assert run.workbook_summary.total_rows == 3
     assert run.workbook_summary.complete_rows == 1
-    assert run.workbook_summary.partial_rows == 1
+    assert run.workbook_summary.review_rows == 1
     assert run.workbook_summary.missing_rows == 1
 
     by_name = {r.plaza_name: r for r in run.rows}
     assert by_name["ALPHA"].status == Status.COMPLETE
-    assert by_name["BETA"].status == Status.PARTIAL
+    assert by_name["BETA"].status == Status.REVIEW
+    assert by_name["BETA"].per_column["L"].status == Status.PARTIAL  # the cell itself is still PARTIAL
     assert by_name["GAMMA"].status == Status.MISSING
 
 

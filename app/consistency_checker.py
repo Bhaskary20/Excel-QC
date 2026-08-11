@@ -238,11 +238,15 @@ def _check_consistency(per_column: dict[str, CellResult], n: int) -> list[Consis
     return findings
 
 
-def _row_status(per_column: dict[str, CellResult], identity_mismatches: list[str]) -> Status:
-    worst = max(per_column.values(), key=lambda r: STATUS_SEVERITY[r.status]).status
+def _row_status(
+    per_column: dict[str, CellResult], identity_mismatches: list[str], findings: list[ConsistencyFinding]
+) -> Status:
+    candidates = [max(per_column.values(), key=lambda r: STATUS_SEVERITY[r.status]).status]
     if identity_mismatches:
-        return max([worst, Status.REVIEW], key=lambda s: STATUS_SEVERITY[s])
-    return worst
+        candidates.append(Status.REVIEW)
+    if findings:
+        candidates.append(max((f.severity for f in findings), key=lambda s: STATUS_SEVERITY[s]))
+    return max(candidates, key=lambda s: STATUS_SEVERITY[s])
 
 
 def _row_completeness(per_column: dict[str, CellResult], n: int) -> Optional[float]:
@@ -264,7 +268,7 @@ def check_row(row_index: dict[tuple[int, int], object], row_match: RowMatch, cfg
     }
 
     findings = _check_consistency(per_column, n)
-    status = _row_status(per_column, row_match.identity_mismatches)
+    status = _row_status(per_column, row_match.identity_mismatches, findings)
     completeness = _row_completeness(per_column, n)
 
     return RowResult(

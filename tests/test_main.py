@@ -20,7 +20,7 @@ _FULL_ROW = {
     "G": "BOT",
     "H": "1. Agency One\n2. Agency Two",
     "I": "1. EQ (3 months)\n2. Regular (1 year)",
-    "J": "1. 10/08/2021 - 10/11/2021\n2. 10/11/2021 - 14/01/2026",
+    "J": "1. 01/01/2021 - 10/11/2021\n2. 10/11/2021 - 14/01/2026",
     "K": "1. Rahul Sharma\n2. Amit Kumar",
     "L": "1. 9876543210\n2. 9876543211",
     "M": "1. Toll Plaza Road, Bhopal\n2. Toll Plaza Road, Bhopal",
