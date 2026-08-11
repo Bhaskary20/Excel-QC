@@ -5,7 +5,16 @@ scores 100%.
 
 Algorithm, in order:
   1. Normalize (NBSP, zero-width chars, line endings, outer whitespace).
-  2. Whole-cell N/A check -> is_na.
+  2. Whole-cell N/A check -> is_na, but ONLY for a non-required column (S,
+     the only one). A required column has no legitimate "doesn't apply"
+     case -- every operating toll plaza has real agencies, a manager, a
+     consultant -- so whole-cell "N/A"/"Not Available" text there is
+     treated as unfilled (-> MISSING) instead of given a free
+     NOT_APPLICABLE pass. Confirmed against real client data: a plaza can
+     write literal "NA" across N/O/P (Supervision Consultant, Team
+     Leader, HTMS/Toll Expert) while other columns show it clearly has
+     real agencies under contract -- the human reviewer flags that as a
+     problem, not a deliberate opt-out.
   3. Fast-path scaffold check: text is byte-identical to the column's
      scaffold_raw (from template_spec) -> is_unfilled_scaffold, no further
      parsing needed.
@@ -298,6 +307,8 @@ def parse_slots(text: Optional[str], column_letter: str, cfg: Config) -> SlotPar
         return SlotParseResult(is_na=False, is_unfilled_scaffold=True)
 
     if _is_na_token(normalized, cfg):
+        if spec.required:
+            return SlotParseResult(is_na=False, is_unfilled_scaffold=True)
         return SlotParseResult(is_na=True, is_unfilled_scaffold=False)
 
     if not spec.slotted:

@@ -154,9 +154,24 @@ def test_trailing_whitespace_trimmed(cfg):
 
 
 @pytest.mark.parametrize("token", ["N/A", "NA", "Nil", "-", "Not Applicable", "n/a", "nil"])
-def test_na_tokens_set_is_na_not_a_value(cfg, token):
-    result = parse_slots(token, "M", cfg)
+def test_na_tokens_on_optional_column_set_is_na_not_a_value(cfg, token):
+    # S (Remarks) is the one genuinely optional column -- a deliberate
+    # whole-cell "N/A" there really is a legitimate non-answer.
+    result = parse_slots(token, "S", cfg)
     assert result.is_na is True
+    assert result.slots == {}
+
+
+@pytest.mark.parametrize("token", ["N/A", "NA", "Nil", "-", "Not Applicable", "n/a", "nil"])
+def test_na_tokens_on_required_column_read_as_unfilled_not_na(cfg, token):
+    # M (Address of Toll Agency) is required -- every operating toll plaza
+    # has one, so a whole-cell "N/A" is treated as unfilled (-> MISSING
+    # downstream), not given a free NOT_APPLICABLE pass. Confirmed against
+    # real client data (KITLANA/NUNMATH: N/O/P literally "NA"/"Not
+    # Available" while the plaza clearly has real agencies under contract).
+    result = parse_slots(token, "M", cfg)
+    assert result.is_na is False
+    assert result.is_unfilled_scaffold is True
     assert result.slots == {}
 
 

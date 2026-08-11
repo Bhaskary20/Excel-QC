@@ -58,9 +58,19 @@ def test_parse_cell_untouched_scaffold(cfg):
     assert result.slot_values == []
 
 
-def test_parse_cell_na_token(cfg):
+def test_parse_cell_na_token_on_required_column_is_unfilled_not_na(cfg):
+    # L is required -- whole-cell "N/A" reads as unfilled (-> MISSING
+    # downstream), not a free NOT_APPLICABLE pass. See slot_parser.py.
     cell = _cell(15, 12, "N/A")
     result = parse_cell(cell, "L", cfg)
+    assert result.is_na is False
+    assert result.is_unfilled_scaffold is True
+    assert result.slot_values == []
+
+
+def test_parse_cell_na_token_on_optional_column_is_na(cfg):
+    cell = _cell(15, 19, "N/A")
+    result = parse_cell(cell, "S", cfg)
     assert result.is_na is True
     assert result.slot_values == []
 

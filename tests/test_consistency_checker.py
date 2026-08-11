@@ -155,20 +155,34 @@ def test_optional_remarks_blank_is_not_applicable(cfg):
     assert result.per_column["S"].status == Status.NOT_APPLICABLE
 
 
-def test_explicit_na_is_not_applicable(cfg):
+def test_explicit_na_on_required_column_is_missing(cfg):
+    # L is required -- there's no legitimate "doesn't apply" case (every
+    # operating toll plaza has a manager to contact), so a whole-cell
+    # "N/A" reads MISSING, not a free NOT_APPLICABLE pass. Confirmed
+    # against real client data: KITLANA/NUNMATH write literal "NA"/"Not
+    # Available" across whole required columns (N/O/P) while other
+    # columns show the plaza clearly has real agencies under contract --
+    # the human reviewer flags that as a problem, not an opt-out.
     result = _check(15, {"L": "N/A"}, cfg)
-    assert result.per_column["L"].status == Status.NOT_APPLICABLE
-    assert result.per_column["L"].completeness is None
+    assert result.per_column["L"].status == Status.MISSING
+    assert result.per_column["L"].completeness == 0.0
+
+
+def test_explicit_na_on_optional_remarks_is_not_applicable(cfg):
+    # S (Remarks) is the one genuinely optional column -- the only place
+    # a whole-cell "N/A" is still trusted as a deliberate non-answer.
+    result = _check(15, {"S": "N/A"}, cfg)
+    assert result.per_column["S"].status == Status.NOT_APPLICABLE
+    assert result.per_column["S"].completeness is None
 
 
 # ============================================================================
 # Per-slot NA/"Not Assigned" -- found via real client data (MAUHARI): a
 # numbered list where SOME entries are real and others say "Not Assigned".
-# Deliberately different from a *whole-cell* "N/A" (above): declaring one
-# entry in an otherwise-populated list a non-answer contradicts what the
-# anchor column (H) already says exists, so it must drag the cell to
-# MISSING/PARTIAL -- never count toward valid_count, and never INVALID
-# either (it's not a wrong value, it's an absent one).
+# Same underlying principle as a *whole-cell* "N/A" on a required column
+# (above): a non-answer never counts toward valid_count, and never reads
+# INVALID either (it's not a wrong value, it's an absent one) -- it drags
+# the cell to MISSING/PARTIAL.
 # ============================================================================
 
 
@@ -324,14 +338,26 @@ def test_no_slot_count_mismatch_when_fully_filled(cfg):
     assert findings == []
 
 
-def test_no_slot_count_mismatch_when_column_is_explicitly_na(cfg):
-    # A whole-cell N/A leaves missing_slots populated (no slots were ever
-    # parsed), but that's the client saying "doesn't apply", not "forgot
-    # to fill this in" -- must not produce a false slot_count_mismatch.
+def test_slot_count_mismatch_fires_when_required_column_is_explicitly_na(cfg):
+    # L is required, so a whole-cell "N/A" is a genuine gap (MISSING), not
+    # a trusted opt-out -- the slot_count_mismatch finding must fire here,
+    # same as any other unfilled required column.
     result = _check(15, {"L": "N/A"}, cfg)
-    assert result.per_column["L"].status == Status.NOT_APPLICABLE
-    assert result.per_column["L"].missing_slots  # still populated on the cell itself
+    assert result.per_column["L"].status == Status.MISSING
+    assert result.per_column["L"].missing_slots
     findings = [f for f in result.consistency_findings if f.kind == "slot_count_mismatch" and f.column == "L"]
+    assert len(findings) == 1
+
+
+def test_no_slot_count_mismatch_when_optional_column_is_explicitly_na(cfg):
+    # S (Remarks) is the one genuinely optional, non-slotted column -- it
+    # never participates in slot_count_mismatch checking at all (that
+    # check only runs over the slotted columns), so this is really just
+    # confirming a whole-cell N/A there stays a clean NOT_APPLICABLE with
+    # no side effects.
+    result = _check(15, {"S": "N/A"}, cfg)
+    assert result.per_column["S"].status == Status.NOT_APPLICABLE
+    findings = [f for f in result.consistency_findings if f.kind == "slot_count_mismatch" and f.column == "S"]
     assert findings == []
 
 
