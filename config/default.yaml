@@ -23,7 +23,12 @@ status:
   na_tokens:
     - "n/a"
     - "na"
+    - "n.a."
+    - "n.a"    # trailing-punctuation stripping (_clean_slot_value) turns "n.a." into this before the per-slot check runs
     - "not applicable"
+    - "not assigned"
+    - "unassigned"
+    - "not available"
     - "nil"
     - "none"
     - "-"

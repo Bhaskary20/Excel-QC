@@ -161,6 +161,43 @@ def test_na_tokens_set_is_na_not_a_value(cfg, token):
 
 
 # ============================================================================
+# Per-slot NA/"Not Assigned": found via real client data (MAUHARI) -- a
+# numbered list mixing real entries with per-slot non-answers. Unlike a
+# *whole-cell* NA token (above, trusted as "this column doesn't apply"), a
+# non-answer for just one slot in an otherwise-populated list must be
+# dropped like an empty slot -- it does NOT become a valid value, and it
+# does NOT make the whole cell is_na=True.
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "phrase", ["N/A", "NA", "Not Assigned", "NOT ASSIGNED", "Unassigned", "Not Available", "Nil", "-", "n.a."]
+)
+def test_per_slot_na_phrase_dropped_like_an_empty_slot(cfg, phrase):
+    text = f"1. Rahul Sharma\n2. {phrase}\n3. Amit Kumar"
+    result = parse_slots(text, "K", cfg)
+    assert result.slots == {1: "Rahul Sharma", 3: "Amit Kumar"}
+    assert result.is_na is False
+
+
+def test_per_slot_na_does_not_set_whole_cell_is_na(cfg):
+    text = "1. Rahul Sharma\n2. Not Assigned"
+    result = parse_slots(text, "K", cfg)
+    assert result.is_na is False
+    assert result.is_unfilled_scaffold is False
+    assert result.slots == {1: "Rahul Sharma"}
+
+
+def test_all_slots_not_assigned_reads_as_unfilled_scaffold(cfg):
+    # Every slot is a non-answer -- the cell as a whole has nothing to
+    # offer, same as if it had been left as the literal placeholder.
+    text = "1. Not Assigned\n2. Not Assigned\n3. Not Assigned"
+    result = parse_slots(text, "K", cfg)
+    assert result.is_unfilled_scaffold is True
+    assert result.slots == {}
+
+
+# ============================================================================
 # Blank / empty cell
 # ============================================================================
 
@@ -253,3 +290,59 @@ def test_pure_punctuation_slot_dropped(cfg):
 def test_trailing_separator_punctuation_stripped(cfg):
     result = parse_slots("1. Rahul Sharma,\n2. Amit Kumar,", "K", cfg)
     assert result.slots == {1: "Rahul Sharma", 2: "Amit Kumar"}
+
+
+# ============================================================================
+# Orphaned marker recovery -- found via real client data: a numbered list
+# where one item's delimiter was dropped ("1 Agency" instead of "1. Agency")
+# either loses that item entirely (if it's the first) or contaminates the
+# previous item (if it's mid-sequence).
+# ============================================================================
+
+
+def test_leading_orphan_recovered_as_slot_one(cfg):
+    text = "1 Agency Alpha\n2. Agency Beta\n3. Agency Gamma"
+    result = parse_slots(text, "H", cfg)
+    assert result.slots == {1: "Agency Alpha", 2: "Agency Beta", 3: "Agency Gamma"}
+
+
+def test_embedded_orphan_recovered_from_previous_slot(cfg):
+    text = "1. Rahul Sharma\n2. Amit Kumar\n3. Suresh Babu\n4. Pashupati Nath\n5 Veer Murli\n6. Nirpit Misra\n7. Surendra Kumar"
+    result = parse_slots(text, "K", cfg)
+    assert result.slots == {
+        1: "Rahul Sharma", 2: "Amit Kumar", 3: "Suresh Babu", 4: "Pashupati Nath",
+        5: "Veer Murli", 6: "Nirpit Misra", 7: "Surendra Kumar",
+    }
+
+
+def test_embedded_orphan_recovery_requires_a_bounding_next_slot(cfg):
+    # Last slot has no "next" to bound a candidate against -- a multi-line
+    # address ending in something that starts with a digit must stay whole
+    # rather than risk misfiring.
+    text = "1. Consultant Office, Ring Road\n2. House No 5 Main Street, Sample City, Sample District"
+    result = parse_slots(text, "M", cfg)
+    assert result.slots == {
+        1: "Consultant Office, Ring Road",
+        2: "House No 5 Main Street, Sample City, Sample District",
+    }
+
+
+def test_embedded_orphan_not_recovered_outside_the_gap_range(cfg):
+    # "5" here isn't between host_slot(2) and a next claimed slot (there is
+    # none) -- must not be split out.
+    text = "1. Consultant A\n2. 5 things happened here today in this office"
+    result = parse_slots(text, "N", cfg)
+    assert result.slots == {1: "Consultant A", 2: "5 things happened here today in this office"}
+
+
+# ============================================================================
+# Duplicate slot markers: renumber rather than silently overwrite
+# ============================================================================
+
+
+def test_duplicate_slot_marker_renumbered_not_discarded(cfg):
+    text = "1. A\n2. B\n3. C\n4. D\n5. E\n6. Slot Six\n6. Slot Actually Seven"
+    result = parse_slots(text, "H", cfg)
+    assert result.slots[6] == "Slot Six"
+    assert result.slots[7] == "Slot Actually Seven"
+    assert len(result.slots) == 7

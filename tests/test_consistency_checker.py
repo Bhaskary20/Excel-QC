@@ -161,6 +161,47 @@ def test_explicit_na_is_not_applicable(cfg):
     assert result.per_column["L"].completeness is None
 
 
+# ============================================================================
+# Per-slot NA/"Not Assigned" -- found via real client data (MAUHARI): a
+# numbered list where SOME entries are real and others say "Not Assigned".
+# Deliberately different from a *whole-cell* "N/A" (above): declaring one
+# entry in an otherwise-populated list a non-answer contradicts what the
+# anchor column (H) already says exists, so it must drag the cell to
+# MISSING/PARTIAL -- never count toward valid_count, and never INVALID
+# either (it's not a wrong value, it's an absent one).
+# ============================================================================
+
+
+def test_per_slot_not_assigned_is_missing_not_valid(cfg):
+    result = _check(15, {"N": "1. Consultant A\n2. Not Assigned\n3. Consultant C\n4. Consultant D"}, cfg)
+    n_result = result.per_column["N"]
+    assert n_result.status == Status.PARTIAL
+    assert n_result.missing_slots == [2]
+    assert n_result.valid_count == 3
+    assert n_result.invalid_count == 0  # dropped, not marked wrong
+
+
+def test_per_slot_not_assigned_uppercase_matches_real_client_phrasing(cfg):
+    result = _check(15, {"O": "1. Team Lead A\n2. TEAM LEAD B\n3. NOT ASSIGNED\n4. Team Lead D"}, cfg)
+    assert result.per_column["O"].missing_slots == [3]
+
+
+@pytest.mark.parametrize("phrase", ["Not Assigned", "Unassigned", "Not Available", "N/A", "NA", "Nil", "-"])
+def test_per_slot_na_variants_all_dropped(cfg, phrase):
+    result = _check(15, {"K": f"1. Rahul Sharma\n2. {phrase}\n3. Suresh Babu\n4. Vijay Singh"}, cfg)
+    assert result.per_column["K"].missing_slots == [2]
+
+
+def test_per_slot_all_not_assigned_reads_as_missing_not_not_applicable(cfg):
+    # Every slot is a non-answer -- must read as a genuinely unfilled
+    # required column (MISSING), not slip through as NOT_APPLICABLE the
+    # way a literal whole-cell "N/A" would.
+    result = _check(15, {"P": "\n".join(f"{i}. Not Assigned" for i in range(1, 5))}, cfg)
+    p_result = result.per_column["P"]
+    assert p_result.status == Status.MISSING
+    assert p_result.valid_count == 0
+
+
 def test_all_invalid_is_invalid_status(cfg):
     result = _check(15, {"L": "1. abc\n2. def\n3. ghi\n4. jkl"}, cfg)
     assert result.per_column["L"].status == Status.INVALID

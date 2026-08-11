@@ -16,9 +16,15 @@ Algorithm, in order:
      then ;, then type-permitted , or / (comma uses the same digit-guard as
      v1 -- a comma between two digits is a thousands separator).
   6. Per-slot cleanup: strip quotes/trailing punctuation, drop pure
-     punctuation, and drop any slot whose cleaned value still equals the
+     punctuation, drop any slot whose cleaned value still equals the
      column's own placeholder text for that slot (the slow-path scaffold
-     check, for cells that are *mostly* untouched).
+     check, for cells that are *mostly* untouched), and drop any slot whose
+     cleaned value is itself an NA-equivalent phrase ("N/A", "Not Assigned",
+     ...). A per-slot non-answer is treated the same as a genuinely empty
+     slot -- it counts toward missing_slots (MISSING/PARTIAL), not as a
+     validly-answered value. This is deliberately different from a *whole
+     cell* reading e.g. "N/A" (see is_na below), which is trusted at face
+     value as "this column doesn't apply to this plaza."
   7. Cap at MAX_SLOTS; note if truncated.
 
 Placeholder comparison (step 6) parses the column's scaffold_raw through
@@ -51,6 +57,15 @@ _SLOT_MARKER_PATTERN = re.compile(
     r"(?:^|(?<=[\s,;]))(?:\((\d{1,2})\)|(\d{1,2})\s*[.\)\-:])\s*",
     re.MULTILINE,
 )
+
+# A marker that's missing its delimiter entirely -- just "<digit> <content>"
+# with no "." ")" "-" ":" at all (e.g. "1 M/s Agency" or, mid-text, "5 Name").
+# Deliberately narrower than _SLOT_MARKER_PATTERN: no delimiter to anchor on,
+# so it's only trusted as a recovery mechanism for specific, constrained
+# gaps (see _numbered_parse / _recover_embedded_orphans), never as a
+# primary marker source.
+_ORPHANED_LEADING_DIGIT = re.compile(r"^(\d{1,2})\s+(?=\S)")
+_ORPHANED_EMBEDDED_MARKER = re.compile(r"\n\s*(\d{1,2})\s+(?=\S)")
 
 _SEPARATOR_PRECEDENCE = ["\n", ";", ",", "/"]
 _ALLOWED_SEPARATORS: dict[ValueType, frozenset[str]] = {
@@ -138,12 +153,77 @@ def _numbered_parse(text: str) -> dict[int, str]:
         return {}
 
     slots: dict[int, str] = {}
+
+    # Leading text before the first recognized marker is often item 1 with
+    # its delimiter accidentally dropped ("1 Agency Name" instead of "1.
+    # Agency Name") -- real client data does this. Recover it as slot 1 if
+    # that slot isn't already claimed by a proper marker.
+    first_slot_num = int(matches[0].group(1) or matches[0].group(2))
+    leading_text = text[: matches[0].start()].strip()
+    if leading_text and first_slot_num != 1:
+        orphan = _ORPHANED_LEADING_DIGIT.match(leading_text)
+        if orphan:
+            content = leading_text[orphan.end():].strip()
+            if content:
+                slots[1] = content
+
     for i, m in enumerate(matches):
         slot_num = int(m.group(1) or m.group(2))
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        slots[slot_num] = text[start:end]
-    return slots
+        value = text[start:end]
+
+        if slot_num in slots:
+            # Duplicate marker (a human typo -- e.g. two entries both
+            # numbered "6."). Losing data is worse than a slightly-off
+            # slot number, so renumber the later one instead of discarding it.
+            slot_num = max(slots.keys()) + 1
+        slots[slot_num] = value
+
+    return _recover_embedded_orphans(slots)
+
+
+def _recover_embedded_orphans(slots: dict[int, str]) -> dict[int, str]:
+    """A marker missing its delimiter mid-sequence ("5 Name" instead of "5.
+    Name") gets swallowed whole into the *previous* recognized slot's text.
+    Split it back out when a "\\n<digit> <content>" tail appears inside a
+    slot's own text AND that digit plausibly fills the gap strictly between
+    this slot and whatever's claimed next.
+
+    Deliberately requires a next-claimed slot to bound against: without an
+    upper bound, the *last* slot's text has no natural ceiling, and a
+    multi-line address ending in something like "...\\n5 Main Street" could
+    misfire with nothing to constrain it. That means a dropped delimiter on
+    the true final item is a known gap this can't recover -- an acceptable
+    trade against silently corrupting address-like free text.
+    """
+    if not slots:
+        return slots
+
+    claimed = sorted(slots.keys())
+    result = dict(slots)
+
+    for idx, host_slot in enumerate(claimed):
+        next_claimed = claimed[idx + 1] if idx + 1 < len(claimed) else None
+        if next_claimed is None:
+            continue
+
+        match = _ORPHANED_EMBEDDED_MARKER.search(result[host_slot])
+        if not match:
+            continue
+
+        candidate = int(match.group(1))
+        if not (host_slot < candidate < next_claimed):
+            continue
+
+        recovered = result[host_slot][match.end():].strip()
+        if not recovered:
+            continue
+
+        result[host_slot] = result[host_slot][: match.start()].strip()
+        result[candidate] = recovered
+
+    return result
 
 
 def _split_on(text: str, sep: str) -> list[str]:
@@ -175,7 +255,7 @@ def _placeholder_slots_for_column(column_letter: str) -> dict[int, str]:
     return {slot: _clean_slot_value(raw) for slot, raw in _numbered_parse(spec.scaffold_raw).items()}
 
 
-def _parse_slotted_cell(normalized: str, spec: ColumnSpec) -> SlotParseResult:
+def _parse_slotted_cell(normalized: str, spec: ColumnSpec, cfg: Config) -> SlotParseResult:
     if spec.scaffold_raw is not None and normalized == spec.scaffold_raw.strip():
         return SlotParseResult(is_na=False, is_unfilled_scaffold=True)
 
@@ -188,7 +268,7 @@ def _parse_slotted_cell(normalized: str, spec: ColumnSpec) -> SlotParseResult:
         if slot_num > MAX_SLOTS:
             continue
         cleaned = _clean_slot_value(raw_value)
-        if not cleaned or _PURE_PUNCTUATION.match(cleaned):
+        if not cleaned or _PURE_PUNCTUATION.match(cleaned) or _is_na_token(cleaned, cfg):
             continue
         cleaned_slots[slot_num] = cleaned
 
@@ -226,4 +306,4 @@ def parse_slots(text: Optional[str], column_letter: str, cfg: Config) -> SlotPar
             return SlotParseResult(is_na=False, is_unfilled_scaffold=True)
         return SlotParseResult(is_na=False, is_unfilled_scaffold=False, slots={1: cleaned})
 
-    return _parse_slotted_cell(normalized, spec)
+    return _parse_slotted_cell(normalized, spec, cfg)
