@@ -399,7 +399,7 @@ Phases C and D are pure string-in/verdict-out — build and test them with no Ex
 **v2 build**
 - [x] Phase A — `template_spec.py` + header-verification tripwire test
 - [x] Phase B — `models.py` rewrite
-- [ ] Phase C — `slot_parser.py` + tests
+- [x] Phase C — `slot_parser.py` + tests
 - [ ] Phase D — `validators.py` rewrite + tests
 - [ ] Phase E — `row_matcher.py` + tests
 - [ ] Phase F — `response_parser.py` + `consistency_checker.py` + tests
