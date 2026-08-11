@@ -81,6 +81,25 @@ def test_plaza_type_enum_invalid(cfg, value):
     assert not _validate("G", value, cfg).is_valid
 
 
+# "PF"/"FP" are the standard NHAI shorthand for Public Funded -- found via
+# real client data, where the overwhelming majority of responses use the
+# abbreviation rather than the spelled-out form.
+@pytest.mark.parametrize(
+    "value,expected_normalized",
+    [
+        ("PF", "Public Funded"),
+        ("pf", "Public Funded"),
+        ("FP", "Public Funded"),
+        ("Public funded (PF)", "Public Funded"),
+        ("PF (HAM)", "Public Funded"),
+    ],
+)
+def test_plaza_type_pf_abbreviation_aliases(cfg, value, expected_normalized):
+    result = _validate("G", value, cfg)
+    assert result.is_valid
+    assert result.normalized == expected_normalized
+
+
 @pytest.mark.parametrize(
     "value,expected_normalized",
     [

@@ -112,6 +112,11 @@ COLUMNS: dict[str, ColumnSpec] = {
         role=Role.INPUT, value_type=ValueType.ENUM,
         slotted=False, required=True,
         enum_values=("Public Funded", "BOT", "TOT", "Invit", "MLFF"),
+        # "PF" is the standard NHAI shorthand for Public Funded -- the
+        # overwhelming majority of real responses write it this way rather
+        # than the spelled-out form. "FP" covers the same abbreviation
+        # transposed, seen occasionally in real data too.
+        enum_aliases={"Public Funded": ("pf", "fp")},
     ),
     "H": ColumnSpec(
         letter="H", index=8, header="Agency name \n (Pl. list all contracts in said period)",
