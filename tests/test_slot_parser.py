@@ -121,6 +121,37 @@ def test_date_range_slash_never_splits(cfg):
     assert result.slots == {1: "From (10/08/2021) - To (14/01/2026)"}
 
 
+def test_dot_formatted_dates_are_not_shredded_into_bogus_slots(cfg):
+    # Real client data: DD.MM.YYYY dates with no space between the day and
+    # the delimiter ("From 30.01.2023") used to be misread as a fresh "30."
+    # marker, since it's shaped identically to a legitimate zero-space
+    # marker like "1.ABC". Each numbered item here is a full date range.
+    text = (
+        "1. From 30.01.2023 - To 23.06.2023\n"
+        "  2. From 23.06.2023 - To 12.09.2023 \n"
+        "  3. From 12.09.2023 to 29.01.2024"
+    )
+    result = parse_slots(text, "J", cfg)
+    assert result.slots == {
+        1: "From 30.01.2023 - To 23.06.2023",
+        2: "From 23.06.2023 - To 12.09.2023",
+        3: "From 12.09.2023 to 29.01.2024",
+    }
+
+
+def test_dot_formatted_dates_with_time_suffix_not_shredded(cfg):
+    # Real client data (dates immediately preceded by the marker, no "From").
+    text = (
+        "1. 20.10.2020 (08:00:00 Hrs.) to 20.01.2022 (07:59:59 Hrs.)\n"
+        "2. 20.01.2022 (08:00:00 Hrs.) to 22.03.2022 (07:59:59 Hrs.)"
+    )
+    result = parse_slots(text, "J", cfg)
+    assert result.slots == {
+        1: "20.10.2020 (08:00:00 Hrs.) to 20.01.2022 (07:59:59 Hrs.)",
+        2: "20.01.2022 (08:00:00 Hrs.) to 22.03.2022 (07:59:59 Hrs.)",
+    }
+
+
 # ============================================================================
 # Normalization: NBSP, zero-width chars, \r\n, trailing whitespace
 # ============================================================================

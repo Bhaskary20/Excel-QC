@@ -70,6 +70,10 @@ class ColumnSpec:
     # e.g. I's "3 months" alone (no "EQ" prefix) -> "EQ (3 months)". Only I
     # needs this; G's values are already distinct standalone words.
     enum_aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # R only: a plaza can genuinely have zero exempted-vehicle traffic on
+    # record, unlike Q where zero average daily traffic is implausible for
+    # an operating toll plaza.
+    allow_zero: bool = False
 
 
 _SCAFFOLD_BLANK = "  1. \n  2. \n  3.\n  4. \n  5.\n  6."
@@ -132,7 +136,10 @@ COLUMNS: dict[str, ColumnSpec] = {
         enum_values=("EQ (3 months)", "Regular (1 year)"),
         enum_aliases={
             "EQ (3 months)": ("eq", "3 month", "3months"),
-            "Regular (1 year)": ("regular", "1 year", "1year", "annual"),
+            # "Reguler"/"Reguar" are the two misspellings of "Regular" seen
+            # repeatedly in real client data (THIRPALIBADI, AKHEPURA x4,
+            # Kadaligarh) -- common enough to trust rather than flag INVALID.
+            "Regular (1 year)": ("regular", "reguler", "reguar", "1 year", "1year", "annual"),
         },
     ),
     "J": ColumnSpec(
@@ -187,6 +194,7 @@ COLUMNS: dict[str, ColumnSpec] = {
         letter="R", index=18, header="Average Traffic Count of Exempted vehicles during the said contract period of Agency",
         role=Role.INPUT, value_type=ValueType.NUMBER,
         slotted=True, required=True, scaffold_raw=_SCAFFOLD_BLANK,
+        allow_zero=True,
     ),
     "S": ColumnSpec(
         letter="S", index=19, header="Remarks",

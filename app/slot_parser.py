@@ -62,8 +62,22 @@ _MULTI_BLANK_LINES = re.compile(r"\n{3,}")
 # immediately after whitespace/comma/semicolon -- so "1. A, 2. B" on one
 # physical line still finds marker 2 even though re.MULTILINE's ^ alone
 # would only anchor at true line starts.
+#
+# "1.ABC" (no space after the delimiter) is a legitimate zero-space marker
+# per BUILD_PLAN.md, but a dot-formatted date's day component is shaped
+# identically -- "From 30.01.2023" has "30." sitting right after a space,
+# indistinguishable from a real marker by shape alone. Found via real J
+# (Contract Start & End date) data: dozens of DD.MM.YYYY cells were shredded
+# into bogus slots keyed by day-of-month. The two cases only diverge on
+# what immediately follows a *zero-space* delimiter: real marker content
+# starts with a name/word, a date's next component is more digits. A
+# marker followed by actual whitespace is never ambiguous and is always
+# trusted, regardless of what comes after it.
+_DATE_CONTINUATION = r"\d{1,2}[./]\d{2,4}"
 _SLOT_MARKER_PATTERN = re.compile(
-    r"(?:^|(?<=[\s,;]))(?:\((\d{1,2})\)|(\d{1,2})\s*[.\)\-:])\s*",
+    r"(?:^|(?<=[\s,;]))"
+    r"(?:\((\d{1,2})\)\s*"
+    rf"|(\d{{1,2}})\s*[.\)\-:](?:\s+|(?!{_DATE_CONTINUATION})))",
     re.MULTILINE,
 )
 

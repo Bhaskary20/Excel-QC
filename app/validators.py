@@ -138,28 +138,61 @@ def validate_enum(value: str, cfg: Config, spec: ColumnSpec) -> ValueVerdict:
 # ============================================================================
 # NAME -- K, O. Same shape as v1: letters/space/./'/-, Unicode-aware via
 # [^\W\d_] so Indian-script names pass without needing the `regex` package.
+# "&" and "/" are also allowed directly in the name so two people sharing
+# one slot ("Sanjeev Singh/Anil Singh") aren't rejected outright.
+#
+# Real client data overwhelmingly appends extra info after a real name: a
+# role tag in parens ("(RE)", "(TL)", "(ATL)", "(Team Leader)"), a tenure
+# date range ("(01.01.2021 to 21.07.2024)"), or a contact detail after a
+# comma/dash ("Ravindra Patel, 9111163032", "Sh. Ashok Kumar- info@x.com").
+# None of that makes the underlying name itself invalid -- strip it before
+# validating rather than rejecting a real name over its annotation. Known
+# gap: if the *entire* value is a parenthetical explanation with only a
+# short non-name fragment outside it (e.g. "MoRTH (Only Toll collection...)"),
+# that fragment can slip through looking like a short but valid name --
+# accepted as a disclosed trade-off given how much real annotated data this
+# unblocks.
 # ============================================================================
 
-_NAME_CHAR_PATTERN = re.compile(r"^[^\W\d_](?:[ .'\-]|[^\W\d_])*$")
+_NAME_CHAR_PATTERN = re.compile(r"^[^\W\d_](?:[ .'\-&/]|[^\W\d_])*$")
 _DIGIT_CHAR = re.compile(r"\d")
+_PAREN_ANNOTATION = re.compile(r"\([^)]*\)?")
+# A phone number introduced by its own label ("Mobile: 8817009004", "Mo
+# 97855 70801", "Mob- 8874768888, 8318221447") rather than a bare comma/dash.
+_TRAILING_LABELED_CONTACT = re.compile(
+    r"\s+(?:mobile|mob|mo|contact|phone|ph)\s*[:.\-]?\s*\d[\d\s,]*$", re.IGNORECASE
+)
+_TRAILING_CONTACT_SUFFIX = re.compile(r"[,\-]\s*(?=[^,\-]*(?:\d|@))[^,\-]*$")
+_STRAY_EDGE_PUNCTUATION = re.compile(r"^[\s.,;\-]+|[\s.,;\-]+$")
+
+
+def _strip_name_annotations(text: str) -> str:
+    stripped = _PAREN_ANNOTATION.sub(" ", text)
+    stripped = _TRAILING_LABELED_CONTACT.sub("", stripped)
+    stripped = _TRAILING_CONTACT_SUFFIX.sub("", stripped)
+    stripped = re.sub(r"\s+", " ", stripped)
+    return _STRAY_EDGE_PUNCTUATION.sub("", stripped).strip()
 
 
 def validate_name(value: str, cfg: Config, spec: ColumnSpec) -> ValueVerdict:
     text = re.sub(r"\s+", " ", value.strip())
+    core = _strip_name_annotations(text)
+    annotation_stripped = core != text
 
-    length = len(text)
+    length = len(core)
     if length < cfg.validation.name.min_length or length > cfg.validation.name.max_length:
         return _fail(f"expected {cfg.validation.name.min_length}-{cfg.validation.name.max_length} characters, got {length}")
 
-    digit_count = len(_DIGIT_CHAR.findall(text))
+    digit_count = len(_DIGIT_CHAR.findall(core))
     if digit_count / length >= 0.8:
         return _fail("mostly digits, not a name")
 
-    if not _NAME_CHAR_PATTERN.match(text):
-        return _fail("contains characters not allowed in a name (letters, spaces, . ' - only)")
+    if not _NAME_CHAR_PATTERN.match(core):
+        return _fail("contains characters not allowed in a name (letters, spaces, . ' - & / only)")
 
-    normalized = " ".join(word.capitalize() for word in text.split(" "))
-    return _ok(normalized)
+    normalized = " ".join(word.capitalize() for word in core.split(" "))
+    reason = "trailing annotation (role tag / contact detail / date range) stripped" if annotation_stripped else ""
+    return _ok(normalized, reason=reason)
 
 
 # ============================================================================
@@ -247,23 +280,41 @@ def validate_address(value: str, cfg: Config, spec: ColumnSpec) -> ValueVerdict:
 
 # ============================================================================
 # NUMBER -- Q, R (traffic counts). Positive integers after stripping
-# grouping commas and known unit words.
+# grouping commas, known unit words, fiscal-year labels some PIUs attach to
+# each yearly figure (e.g. "FY 2020-21 - 1240", "2924.95 (FY 2020-21)"), and
+# a trailing parenthetical remark some PIUs append (e.g. "4824 (Till Date
+# 27/07/2026)", including one seen missing its closing paren).
 # ============================================================================
 
-_NUMBER_UNIT_PATTERN = re.compile(r"\b(veh(?:icles?)?|pcu|per\s*day)\b|/\s*day", re.IGNORECASE)
+_NUMBER_UNIT_PATTERN = re.compile(
+    r"\b(veh(?:icles?)?|pcu|per\s*avg\.?\s*traffic|per\s*day)\b|/\s*day", re.IGNORECASE
+)
+_FY_LABEL_PATTERN = re.compile(r"\bFY\s*\d{4}\s*[-–]\s*\d{2,4}\b", re.IGNORECASE)
+_TRAILING_PAREN_REMARK = re.compile(r"\([^)]*\)?\s*$")
+_NUMBER_TOKEN_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def validate_number(value: str, cfg: Config, spec: ColumnSpec) -> ValueVerdict:
     text = value.strip().replace(",", "")
-    text = _NUMBER_UNIT_PATTERN.sub("", text).strip()
+    text = _FY_LABEL_PATTERN.sub(" ", text)
+    text = _TRAILING_PAREN_REMARK.sub(" ", text)
+    text = _NUMBER_UNIT_PATTERN.sub(" ", text).strip()
 
-    if not re.fullmatch(r"-?\d+(\.\d+)?", text):
-        return _fail("not a valid number")
+    if re.fullmatch(r"-?\d+(\.\d+)?", text):
+        cleaned = text
+    else:
+        # After stripping the fiscal-year label and unit words, a single
+        # leftover numeric token is unambiguous; anything else (none, or
+        # more than one) is a genuinely unparseable value.
+        tokens = _NUMBER_TOKEN_PATTERN.findall(text)
+        if len(tokens) != 1:
+            return _fail("not a valid number")
+        cleaned = tokens[0]
 
-    numeric = float(text)
+    numeric = float(cleaned)
     if numeric < 0:
         return _fail("negative values are not allowed")
-    if numeric == 0:
+    if numeric == 0 and not spec.allow_zero:
         return _fail("must be a positive value")
 
     normalized = str(int(numeric)) if numeric == int(numeric) else str(numeric)

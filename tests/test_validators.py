@@ -116,6 +116,15 @@ def test_eq_regular_enum_valid_including_aliases(cfg, value, expected_normalized
     assert result.normalized == expected_normalized
 
 
+# "Reguler"/"Reguar" are misspellings of "Regular" seen repeatedly in real
+# client data (THIRPALIBADI, AKHEPURA x4, Kadaligarh).
+@pytest.mark.parametrize("value", ["Reguler", "reguler", "Reguar"])
+def test_eq_regular_enum_tolerates_common_misspellings(cfg, value):
+    result = _validate("I", value, cfg)
+    assert result.is_valid
+    assert result.normalized == "Regular (1 year)"
+
+
 @pytest.mark.parametrize("value", ["Monthly", "Yearly", "Quarterly"])
 def test_eq_regular_enum_invalid(cfg, value):
     assert not _validate("I", value, cfg).is_valid
@@ -139,6 +148,63 @@ def test_name_invalid(cfg, value):
 def test_name_columns_k_and_o_share_the_same_rule(cfg):
     assert _validate("K", "Rahul Sharma", cfg).is_valid
     assert _validate("O", "Rahul Sharma", cfg).is_valid
+
+
+# Real client data overwhelmingly appends a role tag, contact detail, or
+# tenure date range after a real name rather than sending a bare name.
+@pytest.mark.parametrize(
+    "value,expected_normalized",
+    [
+        ("Vijay Verma (RE)", "Vijay Verma"),
+        ("SBK Singh  ( TL)", "Sbk Singh"),
+        ("Sh. Ashutosh Mishra (Team Leader)", "Sh. Ashutosh Mishra"),
+        ("Sh. B.l. Sharma (01.01.2021 to 21.07.2024)", "Sh. B.l. Sharma"),
+        ("Ravindra Patel, 9111163032", "Ravindra Patel"),
+        ("Narendra Verma, 79874 86919", "Narendra Verma"),
+        ("Shishpal- 9984949615", "Shishpal"),
+        ("Sanjay kumar-7895980300", "Sanjay Kumar"),
+        ("Sh. Ashok Kumar- info@skylarkworld.com", "Sh. Ashok Kumar"),
+        ("Sh. Jetandra Kr Singh - arcpltoll@arcpl.com", "Sh. Jetandra Kr Singh"),
+    ],
+)
+def test_name_strips_trailing_annotation(cfg, value, expected_normalized):
+    result = _validate("K", value, cfg)
+    assert result.is_valid
+    assert result.normalized == expected_normalized
+    assert result.reason
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Sh. Uday Sinde & Bharat Singh",
+        "Sanjeev Singh/Anil Singh",
+        "Bora Ete/Vikas Hatwar",
+    ],
+)
+def test_name_allows_two_names_joined_for_one_slot(cfg, value):
+    assert _validate("O", value, cfg).is_valid
+
+
+@pytest.mark.parametrize(
+    "value,expected_normalized",
+    [
+        ("Mr. Sushil Nimbarkar \nMobile: 8817009004", "Mr. Sushil Nimbarkar"),
+        ("Yogesh Singh Parmar (RE)\nMo 97855 70801", "Yogesh Singh Parmar"),
+        ("Sanjay Kumar Singh (RE) Mob- 8874768888, 8318221447", "Sanjay Kumar Singh"),
+    ],
+)
+def test_name_strips_labeled_phone_annotation(cfg, value, expected_normalized):
+    result = _validate("O", value, cfg)
+    assert result.is_valid
+    assert result.normalized == expected_normalized
+
+
+def test_name_reason_never_echoes_the_raw_value(cfg):
+    # BUILD_PLAN Phase D gate: no validator reason string echoes client text.
+    value = "Ravindra Patel, 9111163032"
+    result = _validate("K", value, cfg)
+    assert value not in (result.reason or "")
 
 
 # ============================================================================
@@ -223,6 +289,47 @@ def test_number_invalid(cfg, value):
 def test_number_columns_q_and_r_share_the_same_rule(cfg):
     assert _validate("Q", "1500", cfg).is_valid
     assert _validate("R", "1500", cfg).is_valid
+
+
+def test_zero_is_valid_for_r_but_not_q(cfg):
+    # R (exempted-vehicle traffic) can genuinely be zero; Q (average daily
+    # traffic) can't for a plaza that's actually operating.
+    assert _validate("R", "0", cfg).is_valid
+    assert not _validate("Q", "0", cfg).is_valid
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("FY 2020-21 - 1240", "1240"),
+        ("FY 2021-2022 Per Avg Traffic - 14623", "14623"),
+        ("FY 2020-21 - 30223 PCU", "30223"),
+        ("2924.95 (FY 2020-21)", "2924.95"),
+        ("7176.27 (FY 2025-26)", "7176.27"),
+    ],
+)
+def test_number_strips_fiscal_year_labels(cfg, value, expected):
+    result = _validate("Q", value, cfg)
+    assert result.is_valid
+    assert result.normalized == expected
+
+
+@pytest.mark.parametrize("value", ["FY 2020-21 - 1500 or 2000", "FY 2020-21"])
+def test_number_still_rejects_ambiguous_or_valueless_text(cfg, value):
+    assert not _validate("Q", value, cfg).is_valid
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("4824 (Till Date 27/07/2026)", "4824"),
+        ("150 (Till Date 22/06/2026", "150"),  # real data: missing closing paren
+    ],
+)
+def test_number_strips_trailing_parenthetical_remark(cfg, value, expected):
+    result = _validate("Q", value, cfg)
+    assert result.is_valid
+    assert result.normalized == expected
 
 
 # ============================================================================
