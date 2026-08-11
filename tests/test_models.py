@@ -1,83 +1,101 @@
-"""Domain model gate: models import cleanly and TYPE_REGISTRY is complete.
+"""Phase B gate: the slot-aware domain model imports cleanly, and
+VALIDATOR_REGISTRY has an entry for every template_spec.ValueType.
 
-Per-type behavior (separators, validators) is exercised by
-test_value_splitter.py and test_validators.py. This file only checks the
-shape of the registry itself.
-
-NOTE (v2): this covers the v1 generic model. models.py is rewritten in
-Phase B of BUILD_PLAN.md v2 to be slot-aware; expect this file to be
-rewritten alongside it.
+Per-type validation behavior is exercised by test_validators.py once that
+module is rewritten (Phase D). This file only checks the shape of the
+model and the registry.
 """
 
 from app.config import load_config
 from app.models import (
-    TYPE_REGISTRY,
-    ExpectedCount,
-    CountSource,
-    FieldType,
-    ParsedValue,
+    VALIDATOR_REGISTRY,
+    CellResult,
+    ConsistencyFinding,
+    QCRun,
+    RowResult,
+    SheetSummary,
+    SlotValue,
     Status,
-    TypeProfile,
     ValueVerdict,
-    get_type_profile,
+    WorkbookSummary,
+    get_validator,
 )
+from app.template_spec import SHEET_NAME, ValueType
 
 
-def test_every_field_type_has_a_registry_entry():
-    missing = [t for t in FieldType if t not in TYPE_REGISTRY]
-    assert not missing, f"FieldType members missing from TYPE_REGISTRY: {missing}"
+def test_every_value_type_has_a_registry_entry():
+    missing = [t for t in ValueType if t not in VALIDATOR_REGISTRY]
+    assert not missing, f"ValueType members missing from VALIDATOR_REGISTRY: {missing}"
 
 
-def test_registry_entries_are_well_formed():
-    for field_type, profile in TYPE_REGISTRY.items():
-        assert isinstance(profile, TypeProfile)
-        assert profile.type == field_type
-        for sep in profile.allowed_separators:
-            assert sep not in profile.forbidden_separators, (
-                f"{field_type}: '{sep}' is both allowed and forbidden"
-            )
-        assert callable(profile.validator)
-
-
-def test_unknown_type_is_conservative():
-    profile = get_type_profile(FieldType.UNKNOWN)
-    assert "," in profile.forbidden_separators
-    assert profile.label_keywords == []
-
-
-def test_get_type_profile_falls_back_safely():
-    # Every real FieldType member must resolve to itself, never silently to UNKNOWN.
-    for field_type in FieldType:
-        assert get_type_profile(field_type).type == field_type
+def test_get_validator_resolves_every_type():
+    for value_type in ValueType:
+        assert callable(get_validator(value_type))
 
 
 def test_placeholder_validator_accepts_nonempty_rejects_empty():
     cfg = load_config()
-    profile = get_type_profile(FieldType.PHONE)
-    ok = profile.validator("9876543210", cfg)
+    validator = get_validator(ValueType.PHONE)
+    ok = validator("9876543210", cfg)
     assert ok.is_valid is True
 
-    blank = profile.validator("   ", cfg)
+    blank = validator("   ", cfg)
     assert blank.is_valid is False
-
-
-def test_expected_count_defaults_to_exact_bound():
-    ec = ExpectedCount(count=10, source=CountSource.EXPLICIT_INSTRUCTION, confidence=0.95)
-    assert ec.bound == "exact"
-
-
-def test_expected_count_unknown_shape():
-    ec = ExpectedCount(count=None, source=CountSource.UNKNOWN, confidence=0.20, evidence="no quantity signal found")
-    assert ec.count is None
-    assert ec.confidence == 0.20
-
-
-def test_parsed_value_holds_a_verdict():
-    pv = ParsedValue(index=1, raw="9876543210", verdict=ValueVerdict(is_valid=True, normalized="9876543210"))
-    assert pv.verdict.is_valid
-    assert pv.index == 1
 
 
 def test_status_members_match_spec():
     names = {s.value for s in Status}
     assert names == {"COMPLETE", "PARTIAL", "MISSING", "INVALID", "REVIEW", "NOT_APPLICABLE"}
+
+
+def test_slot_value_holds_a_verdict():
+    sv = SlotValue(slot=1, raw="9876543210", verdict=ValueVerdict(is_valid=True, normalized="9876543210"))
+    assert sv.verdict.is_valid
+    assert sv.slot == 1
+
+
+def test_cell_result_tracks_missing_slots_explicitly():
+    result = CellResult(
+        sheet=SHEET_NAME, cell="L15", column="L", field_name="Contact of Toll Manager",
+        value_type=ValueType.PHONE, expected_count=4, detected_count=2, valid_count=2,
+        invalid_count=0, missing_count=2, missing_slots=[3, 4], completeness=0.5,
+        status=Status.PARTIAL, confidence=1.0, reason="2 valid of 4 expected; slots 3, 4 missing",
+        slot_values=[
+            SlotValue(slot=1, raw="9876543210", verdict=ValueVerdict(is_valid=True, normalized="9876543210")),
+            SlotValue(slot=2, raw="9876543211", verdict=ValueVerdict(is_valid=True, normalized="9876543211")),
+        ],
+    )
+    assert result.missing_slots == [3, 4]
+    assert len(result.slot_values) == 2
+
+
+def test_row_result_holds_per_column_cell_results_and_findings():
+    cell = CellResult(
+        sheet=SHEET_NAME, cell="H15", column="H", field_name="Agency name",
+        value_type=ValueType.TEXT, expected_count=None, detected_count=4, valid_count=4,
+        invalid_count=0, missing_count=0, missing_slots=[], completeness=1.0,
+        status=Status.COMPLETE, confidence=1.0, reason="all agencies named", slot_values=[],
+    )
+    finding = ConsistencyFinding(
+        kind="slot_count_mismatch", column="L", severity=Status.REVIEW,
+        message="4 agencies declared but only 2 phone numbers provided",
+    )
+    row = RowResult(
+        sheet=SHEET_NAME, response_row=15, s_no=13, plaza_code="345061", plaza_name="SEHATGANJ",
+        ro="Bhopal", piu="Bhopal", match_strategy="s_no", n_contracts=4,
+        per_column={"H": cell}, consistency_findings=[finding],
+        status=Status.PARTIAL, completeness=0.5,
+    )
+    assert row.n_contracts == 4
+    assert row.per_column["H"].status == Status.COMPLETE
+    assert row.consistency_findings[0].kind == "slot_count_mismatch"
+
+
+def test_qc_run_defaults_are_empty_and_well_formed():
+    run = QCRun(template_path="template/Format.xlsx", response_path="response.xlsx")
+    assert run.rows == []
+    assert run.extra_response_rows == []
+    assert isinstance(run.sheet_summary, SheetSummary)
+    assert run.sheet_summary.sheet == SHEET_NAME
+    assert isinstance(run.workbook_summary, WorkbookSummary)
+    assert run.workbook_summary.total_rows == 0
