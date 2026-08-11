@@ -1,6 +1,11 @@
-"""QCRun -> QC_Report.xlsx, the five sheets from BUILD_PLAN.md v2 Section 7
-Phase H: Summary, Row Analysis, Cell Analysis, Slot Analysis, Consistency
-Findings. Pure presentation layer -- no QC logic lives here.
+"""QCRun -> QC_Report.xlsx: Status, Summary, Row Analysis, Cell Analysis,
+Slot Analysis, Consistency Findings. Pure presentation layer -- no QC logic
+lives here.
+
+Status is the primary, human-facing sheet -- RO | Plaza | PIU | Status |
+Remarks, matching the format NHAI's own PIU-response trackers already use
+(see tests/Status UPSTF_*.xlsx). The remaining sheets are the detailed
+technical audit trail from BUILD_PLAN.md v2 Section 7 Phase H.
 """
 
 from __future__ import annotations
@@ -63,8 +68,36 @@ _SLOT_ANALYSIS_HEADERS = [
     "S.No", "Plaza Name", "Column", "Field Name", "Slot #", "Value", "Validation Status", "Reason",
 ]
 _CONSISTENCY_HEADERS = ["S.No", "Plaza Name", "Column", "Kind", "Severity", "Message"]
+_STATUS_SHEET_HEADERS = ["RO", "Plaza", "PIU", "Status", "Remarks"]
 
 _NON_ISSUE_STATUSES = {Status.COMPLETE, Status.NOT_APPLICABLE}
+
+# Plain-English field groups for the Status sheet's Remarks column, in
+# template column order. Grouped (13 columns -> 10 labels) to match how
+# NHAI's own reviewers write these up -- e.g. "Details of AE/IE, HTMS /
+# Toll expert" covers N+O+P together in tests/Status UPSTF_*.xlsx -- rather
+# than one entry per raw column, which would read as noise.
+_FIELD_GROUPS: list[tuple[str, tuple[str, ...]]] = [
+    ("Plaza Village / Location details", ("F",)),
+    ("Plaza Type", ("G",)),
+    ("Agency name", ("H",)),
+    ("Contract details (EQ/Regular)", ("I",)),
+    ("Contract Start & End dates", ("J",)),
+    ("Name & Contact details of Toll Manager", ("K", "L")),
+    ("Address of Toll Agency", ("M",)),
+    ("Details of AE/IE, HTMS / Toll expert", ("N", "O", "P")),
+    ("Traffic details", ("Q",)),
+    ("Traffic details (Exemption)", ("R",)),
+]
+
+# slot_count_mismatch is deliberately excluded: it's the same gap the
+# field-group labels above already surface, just phrased for internal use.
+_FINDING_KIND_REMARKS: dict[str, str] = {
+    "date_chain_gap": "contract date gap between periods",
+    "date_chain_overlap": "contract date overlap between periods",
+    "date_window_coverage": "contract dates don't cover the full required period",
+    "duplicate_phone": "same phone number used for multiple agencies",
+}
 
 
 def _mask_value(value: str) -> str:
@@ -83,8 +116,7 @@ def _write_header_row(ws: Worksheet, headers: list[str]) -> None:
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
 
-def _apply_status_style(ws: Worksheet, row_idx: int, num_cols: int, status: Status) -> None:
-    style = _STATUS_STYLES.get(status)
+def _apply_style(ws: Worksheet, row_idx: int, num_cols: int, style: tuple[PatternFill, Font] | None) -> None:
     if style is None:
         return
     fill, font = style
@@ -92,6 +124,50 @@ def _apply_status_style(ws: Worksheet, row_idx: int, num_cols: int, status: Stat
         cell = ws.cell(row=row_idx, column=col_idx)
         cell.fill = fill
         cell.font = font
+
+
+def _apply_status_style(ws: Worksheet, row_idx: int, num_cols: int, status: Status) -> None:
+    _apply_style(ws, row_idx, num_cols, _STATUS_STYLES.get(status))
+
+
+# Reuses the same COMPLETE/PARTIAL/MISSING palette so the two sheets read
+# consistently even though the Status sheet's labels are plain strings, not
+# the internal Status enum.
+_RESPONSE_STATUS_STYLES: dict[str, tuple[PatternFill, Font]] = {
+    "Full Response": _STATUS_STYLES[Status.COMPLETE],
+    "Partial Response": _STATUS_STYLES[Status.PARTIAL],
+    "No Response": _STATUS_STYLES[Status.MISSING],
+}
+
+
+def _response_status_label(row: RowResult) -> str:
+    # n_contracts == 0 means the anchor column (agency names) was never
+    # filled in at all -- "No Response" regardless of whether boilerplate
+    # fields like Plaza Village/Type happened to get filled in, since the
+    # substantive contract data is what this QC is actually checking for.
+    if row.n_contracts == 0:
+        return "No Response"
+    if row.status == Status.COMPLETE:
+        return "Full Response"
+    return "Partial Response"
+
+
+def _build_remarks(row: RowResult) -> str:
+    parts = [
+        label
+        for label, columns in _FIELD_GROUPS
+        if any(row.per_column[c].status not in _NON_ISSUE_STATUSES for c in columns if c in row.per_column)
+    ]
+
+    for finding in row.consistency_findings:
+        label = _FINDING_KIND_REMARKS.get(finding.kind)
+        if label and label not in parts:
+            parts.append(label)
+
+    if row.identity_mismatches:
+        parts.append("identity mismatch: " + "; ".join(row.identity_mismatches))
+
+    return ", ".join(parts)
 
 
 def _autosize_columns(ws: Worksheet, num_cols: int) -> None:
@@ -107,6 +183,22 @@ def _finalize_sheet(ws: Worksheet, num_cols: int, num_data_rows: int, cfg: Confi
     if cfg.report.autofilter and num_data_rows > 0:
         ws.auto_filter.ref = f"A1:{get_column_letter(num_cols)}{num_data_rows + 1}"
     _autosize_columns(ws, num_cols)
+
+
+def _write_status_sheet(ws: Worksheet, run: QCRun, cfg: Config) -> None:
+    _write_header_row(ws, _STATUS_SHEET_HEADERS)
+
+    for row_idx, r in enumerate(run.rows, start=2):
+        label = _response_status_label(r)
+        ws.cell(row=row_idx, column=1, value=r.ro)
+        ws.cell(row=row_idx, column=2, value=r.plaza_name)
+        ws.cell(row=row_idx, column=3, value=r.piu)
+        ws.cell(row=row_idx, column=4, value=label)
+        ws.cell(row=row_idx, column=5, value=_build_remarks(r) or None)
+
+        _apply_style(ws, row_idx, len(_STATUS_SHEET_HEADERS), _RESPONSE_STATUS_STYLES.get(label))
+
+    _finalize_sheet(ws, len(_STATUS_SHEET_HEADERS), len(run.rows), cfg)
 
 
 def _write_summary_sheet(ws: Worksheet, run: QCRun) -> None:
@@ -259,6 +351,7 @@ def generate_report(run: QCRun, output_path: str, cfg: Config) -> None:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
+    _write_status_sheet(wb.create_sheet("Status"), run, cfg)
     _write_summary_sheet(wb.create_sheet("Summary"), run)
     _write_row_analysis_sheet(wb.create_sheet("Row Analysis"), run, cfg)
     _write_cell_analysis_sheet(wb.create_sheet("Cell Analysis"), run, cfg)

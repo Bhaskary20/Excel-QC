@@ -1,8 +1,9 @@
-"""Phase H gate: all five sheets present with exact headers, the file
+"""Phase H gate: all six sheets present with exact headers, the file
 round-trips through openpyxl cleanly, completeness is a real number (not
 a string), and the report generates correctly against the real template
 end to end."""
 
+import dataclasses
 from pathlib import Path
 
 import openpyxl
@@ -102,10 +103,19 @@ def _generate(run, cfg, tmp_path, name="QC_Report.xlsx"):
 # ============================================================================
 
 
-def test_report_generates_all_five_sheets_in_order(cfg, tmp_path):
+def test_report_generates_all_six_sheets_in_order(cfg, tmp_path):
     output = _generate(_sample_run(), cfg, tmp_path)
     wb = openpyxl.load_workbook(output)
-    assert wb.sheetnames == ["Summary", "Row Analysis", "Cell Analysis", "Slot Analysis", "Consistency Findings"]
+    assert wb.sheetnames == [
+        "Status", "Summary", "Row Analysis", "Cell Analysis", "Slot Analysis", "Consistency Findings",
+    ]
+
+
+def test_status_sheet_headers_exact(cfg, tmp_path):
+    output = _generate(_sample_run(), cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    headers = [c.value for c in ws[1]]
+    assert headers == ["RO", "Plaza", "PIU", "Status", "Remarks"]
 
 
 def test_row_analysis_headers_exact(cfg, tmp_path):
@@ -140,6 +150,81 @@ def test_consistency_findings_headers_exact(cfg, tmp_path):
     ws = openpyxl.load_workbook(output)["Consistency Findings"]
     headers = [c.value for c in ws[1]]
     assert headers == ["S.No", "Plaza Name", "Column", "Kind", "Severity", "Message"]
+
+
+# ============================================================================
+# Status sheet: RO | Plaza | PIU | Status | Remarks, matching the format of
+# tests/Status UPSTF_*.xlsx (see report_generator.py's module docstring).
+# ============================================================================
+
+
+def test_status_sheet_full_response_for_a_fully_complete_row(cfg, tmp_path):
+    output = _generate(_sample_run(), cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    # MAUHARI (row 3): status=COMPLETE, n_contracts=2 -> Full Response, no remarks.
+    assert ws.cell(row=3, column=1).value == "Bhopal"
+    assert ws.cell(row=3, column=2).value == "MAUHARI"
+    assert ws.cell(row=3, column=3).value == "Chhatarpur"
+    assert ws.cell(row=3, column=4).value == "Full Response"
+    assert ws.cell(row=3, column=5).value is None
+
+
+def test_status_sheet_partial_response_and_field_group_remark(cfg, tmp_path):
+    output = _generate(_sample_run(), cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    # SEHATGANJ (row 2): H complete, L partial -- Partial Response, and the
+    # remark names the K+L group ("Name & Contact details of Toll Manager"),
+    # not the raw column letter "L".
+    assert ws.cell(row=2, column=4).value == "Partial Response"
+    assert ws.cell(row=2, column=5).value == "Name & Contact details of Toll Manager"
+
+
+def test_status_sheet_no_response_when_n_contracts_zero(cfg, tmp_path):
+    run = _sample_run()
+    run.rows[0] = dataclasses.replace(run.rows[0], n_contracts=0)
+    output = _generate(run, cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    assert ws.cell(row=2, column=4).value == "No Response"
+
+
+def test_status_sheet_slot_count_mismatch_not_double_reported(cfg, tmp_path):
+    # SEHATGANJ's one consistency finding is a slot_count_mismatch on L --
+    # that's the same gap the "Name & Contact..." field-group remark already
+    # names, so it must not also appear as its own remarks entry.
+    output = _generate(_sample_run(), cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    remarks = ws.cell(row=2, column=5).value
+    assert remarks.count(",") == 0  # exactly one item, no second clause appended
+
+
+def test_status_sheet_consistency_finding_appended_to_remarks(cfg, tmp_path):
+    run = _sample_run()
+    run.rows[1] = dataclasses.replace(
+        run.rows[1],
+        consistency_findings=[
+            ConsistencyFinding(kind="duplicate_phone", column="L", severity=Status.REVIEW, message="same phone x2"),
+        ],
+    )
+    output = _generate(run, cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    assert ws.cell(row=3, column=5).value == "same phone number used for multiple agencies"
+
+
+def test_status_sheet_identity_mismatch_appended_to_remarks(cfg, tmp_path):
+    run = _sample_run()
+    run.rows[1] = dataclasses.replace(
+        run.rows[1], identity_mismatches=["Plaza Code: template=345061, response=999999"]
+    )
+    output = _generate(run, cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    assert "identity mismatch" in ws.cell(row=3, column=5).value
+
+
+def test_status_sheet_row_style_reflects_response_label(cfg, tmp_path):
+    output = _generate(_sample_run(), cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    complete_fill = ws.cell(row=3, column=1).fill  # MAUHARI, Full Response
+    assert complete_fill.start_color.rgb == "FFC6EFCE"
 
 
 # ============================================================================
@@ -271,7 +356,9 @@ def test_empty_run_does_not_crash(cfg, tmp_path):
     )
     output = _generate(empty_run, cfg, tmp_path, name="empty.xlsx")
     wb = openpyxl.load_workbook(output)
-    assert wb.sheetnames == ["Summary", "Row Analysis", "Cell Analysis", "Slot Analysis", "Consistency Findings"]
+    assert wb.sheetnames == [
+        "Status", "Summary", "Row Analysis", "Cell Analysis", "Slot Analysis", "Consistency Findings",
+    ]
 
 
 # ============================================================================
@@ -318,6 +405,16 @@ def test_end_to_end_against_real_template_untouched(cfg, tmp_path):
     output = _generate(run, cfg, tmp_path, name="real_report.xlsx")
 
     wb = openpyxl.load_workbook(output)
-    assert wb.sheetnames == ["Summary", "Row Analysis", "Cell Analysis", "Slot Analysis", "Consistency Findings"]
+    assert wb.sheetnames == [
+        "Status", "Summary", "Row Analysis", "Cell Analysis", "Slot Analysis", "Consistency Findings",
+    ]
     assert wb["Row Analysis"].max_row == 116  # header + 115 plazas
     assert wb["Cell Analysis"].max_row == 1 + 115 * 14
+
+    # Untouched template as its own response -> every row has n_contracts=0,
+    # so the Status sheet's central "did they even respond" signal must
+    # read "No Response" across the board, with no exceptions.
+    status_ws = wb["Status"]
+    assert status_ws.max_row == 116
+    labels = {status_ws.cell(row=r, column=4).value for r in range(2, status_ws.max_row + 1)}
+    assert labels == {"No Response"}
