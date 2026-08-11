@@ -1,9 +1,12 @@
-"""Phase 2 gate: the domain model imports cleanly and TYPE_REGISTRY is complete.
+"""Domain model gate: models import cleanly and TYPE_REGISTRY is complete.
 
-Per-type behavior (separators, validators, keyword scoring) is exercised by
-test_value_splitter.py, test_validators.py, and test_field_type_detector.py
-once those modules exist (Phases 3-5). This file only checks the shape of
-the registry itself, so it's stable across all later phases.
+Per-type behavior (separators, validators) is exercised by
+test_value_splitter.py and test_validators.py. This file only checks the
+shape of the registry itself.
+
+NOTE (v2): this covers the v1 generic model. models.py is rewritten in
+Phase B of BUILD_PLAN.md v2 to be slot-aware; expect this file to be
+rewritten alongside it.
 """
 
 from app.config import load_config

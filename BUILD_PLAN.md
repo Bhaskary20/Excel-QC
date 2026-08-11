@@ -1,1071 +1,427 @@
-# Excel Response Quality Checker — Build Plan
+# Toll Plaza Response QC — Build Plan (v2, template-driven)
 
 > **Confidential.** All processing is local. No file, cell value, or derived text ever leaves this machine.
 
-A step-by-step plan to build the QC engine. Each phase has a **Goal**, **Files**, **What to build**, and a **Done when** gate. Do not start a phase until the previous phase's gate passes.
+This plan is written against the **actual** template, `template/Format.xlsx`. v1 of this plan assumed an unknown template and specified heuristic detectors to infer structure; that guesswork is now unnecessary and has been removed. The template is fixed and identical on every send — its structure is hardcoded as a declarative spec, and all remaining intelligence goes into reading **messy client responses**.
 
 ---
 
-## 0. Decisions already made (read this first)
+## 1. The template, exactly as it is
 
-These are locked so we don't re-litigate them mid-build.
+**File:** `template/Format.xlsx` · **Sheets:** `Instructions`, `Data Sheet for UP STF`
 
-| Decision | Choice | Why |
-|---|---|---|
-| Project root | `C:\excel automation` **is** the project root — `app/`, `tests/` etc. go directly inside it | Avoids a redundant `excel-qc/excel-qc/` nesting |
-| Excel library | `openpyxl` (already installed, 3.
-1.5) | Reads structure, merged cells, data validation, comments |
-| Python | 3.12.6 (already installed) | — |
-| Template is truth | No hardcoded field names anywhere in `app/` | Requirement §2 |
-| Splitting is type-driven | Detect field type **first**, then choose separators | Requirement §5/§6 — `₹2,50,000` and `10/08/2026` must survive |
-| Unknown count | Return `None` + `REVIEW`. Never guess a number | Requirement §11/§17 |
-| Invalid ≠ valid | Invalid values never contribute to completeness | Requirement §15 |
-| AI | Off by default. Deterministic engine must pass all tests before any model is added | Requirement §26 |
-| Matching strategy | Coordinate-first (same sheet + same cell), then label, then (later) semantic | Template and response are the same workbook shape |
+### 1.1 Sheet `Instructions` — static reference, not data
 
-**Terminology used throughout:**
-- `E` = expected_count, `D` = detected_count, `V` = valid_count, `I` = invalid_count, `M` = missing_count
-- A **field** is one logical question. A **value** is one atom inside a field's cell.
+Rows 6–20, a two-column dictionary (`A` = Column Name, `B` = Instructions). We do not parse this at runtime; we have transcribed its rules into §3 below. It is worth reading once because it is the authority on several QC rules:
+
+| Instruction row | Rule it establishes |
+|---|---|
+| Exact Location of Plaza | Format = `"Village name as per Fee Notification" + "Chainage" + "City name" + "Pincode"` — **4 components** |
+| Plaza Type | Controlled vocabulary: `Public Funded / BOT / TOT / Invit / MLFF` |
+| EQ / Regular | Controlled vocabulary: `EQ (3 months)` or `Regular (1 Year)` |
+| Contract Start & End Date | Format `DD/MM/YYYY - DD/MM/YYYY`, **and** "contract end date of previous agency should match with the contract start date of the new agency" — a chain-continuity rule |
+| Contact Number | "Provide valid mobile number (of Toll manager)" |
+| Note (row 4) | "In cases where additional agencies are associated with a Toll Plaza, please add the additional agency details **below the provided fields**" — so the 6 slots are a **soft cap**, not a hard limit |
+
+### 1.2 Sheet `Data Sheet for UP STF` — the graded sheet
+
+- Row 1: title, merged `A1:S1`
+- Row 2: headers, `A2:S2` (19 columns)
+- Rows 3–117: **115 plaza rows**, one plaza per row
+- `freeze_panes = A3`
+
+> The sheet name says "UP STF" but the data spans 20 ROs nationally (Bhopal, Gujarat, Ranchi, Chandigarh, …). Ignore the name's implication; match the sheet by its exact string.
+
+### 1.3 Column map — the single source of truth
+
+| Col | Header | Role | Type | Cardinality |
+|---|---|---|---|---|
+| A | S.No | **KEY** (pre-filled) | INTEGER | 1 |
+| B | Plaza Code | KEY (pre-filled, **unreliable**) | TEXT | 1 |
+| C | Plaza Name | **KEY** (pre-filled, unique) | TEXT | 1 |
+| D | RO | KEY (pre-filled) | TEXT | 1 |
+| E | PIU | KEY (pre-filled) | TEXT | 1 |
+| F | Plaza - Village, Location | INPUT | COMPOSITE_LOCATION | 1 |
+| G | Plaza Type | INPUT | ENUM | 1 |
+| H | Agency name | INPUT | TEXT | **N (anchor)** |
+| I | EQ (3 months)/ Regular (1 year) | INPUT | ENUM | N |
+| J | Contract Start & End date | INPUT | DATE_RANGE | N |
+| K | Name of Toll Plaza Manager | INPUT | NAME | N |
+| L | Contact of Toll Manager | INPUT | PHONE | N |
+| M | Address of Toll Agency | INPUT | ADDRESS | N |
+| N | Supervision Consultant (AE/IE) name and address | INPUT | TEXT | N |
+| O | Team Leader name (AE/IE) | INPUT | NAME | N |
+| P | HTMS / Toll Expert | INPUT | TEXT | N |
+| Q | Per Day Average Traffic Count | INPUT | NUMBER | N |
+| R | Average Traffic Count of Exempted vehicles | INPUT | NUMBER | N |
+| S | Remarks | INPUT (**optional**) | TEXT | 1 |
+
+**Row keys — verified against the real file:**
+- `A` (S.No) is contiguous `1..115` → **primary key**
+- `C` (Plaza Name) is **unique across all 115 rows** → verification key
+- `B` (Plaza Code) is **not usable as a key**: 2 rows blank (rows 104, 105), 2 rows literally `"-"` (rows 25, 96)
+
+### 1.4 The scaffold — the most important structural fact
+
+Every cell in `H..R`, in all 115 rows, ships pre-filled with **exactly 6 numbered slots**:
+
+```
+Columns I, K, L, M, N, O, P, Q, R:
+  "  1. \n  2. \n  3.\n  4. \n  5.\n  6."
+
+Column H (agency name) carries placeholder text:
+  "  1. Agency \n  2. Agency \n  3. Agency \n  4. Agency\n  5. Agency \n  6. Agency"
+
+Column J (dates) carries a format hint:
+  "  1. From (dd/mm/yyyy ) - To (dd/mm/yyyy) \n  2. From (dd/mm/yyyy ) - To (dd/mm/yyyy) \n  ... 6. ..."
+```
+
+Note the template's own whitespace is already irregular — leading two spaces, `1. ` with a trailing space but `3.` without. Client responses will be worse.
+
+`F`, `G`, and `S` ship **empty** (no scaffold) — they are single-value-per-row fields.
 
 ---
 
-## 1. Environment setup
+## 2. What this template means for the engine
 
-### Step 1.1 — Create the virtual environment
+Five consequences drive the whole design. Everything else is plumbing.
 
-```powershell
-cd "C:\excel automation"
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-```
+### 2.1 Scaffold is not data
 
-If activation is blocked by execution policy:
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
+An untouched cell contains 6 numbered markers and **zero** information. A naive splitter reports "6 values provided"; the truth is **MISSING**. Same for the placeholder words: `Agency` in column H and `From (dd/mm/yyyy ) - To (dd/mm/yyyy)` in column J are template furniture, not responses.
 
-### Step 1.2 — `requirements.txt`
+**This is the single highest-value rule in the system.** Get it wrong and a completely blank submission scores 100%.
 
-```
-openpyxl==3.1.5
-pydantic==2.9.2
-PyYAML==6.0.2
-python-dateutil==2.9.0.post0
-pytest==8.3.3
-```
+### 2.2 Parsing must be slot-aware, not list-aware
 
-Do **not** add `sentence-transformers`, `torch`, `fastapi`, or `ollama` yet. Those land in Phase 15+.
+Values must be parsed into `{slot_number → value}`, never a flat list. Slot identity is what makes cross-column comparison meaningful: slot 3 in column H (the agency) is the *same contract* as slot 3 in column L (that agency's phone number). A flat list destroys that link the moment any slot is left blank in the middle.
 
-```powershell
-pip install -r requirements.txt
-```
+### 2.3 N is per-row and anchored on column H
 
-### Step 1.3 — `.gitignore`
+The number of contracts a plaza had is **not fixed** — it varies per plaza, and the Instructions sheet explicitly permits exceeding 6. So:
 
 ```
-.venv/
-__pycache__/
-*.pyc
-output/
-sample_data/*.xlsx
-!sample_data/.gitkeep
-.pytest_cache/
-*.log
+N(row) = number of filled agency slots in column H
 ```
 
-> Client workbooks are confidential — `sample_data/*.xlsx` is git-ignored so a real client file can never be committed by accident. Synthetic files are regenerated by a script, not stored.
+Every other slotted column (`I..R`) is then expected to have exactly `N` filled slots. If H is itself empty, the row is MISSING wholesale and N is undefined.
 
-### Done when
-- [ ] `.venv` activates
-- [ ] `python -c "import openpyxl, pydantic, yaml; print('ok')"` prints `ok`
+### 2.4 Cross-column consistency is the primary finding
+
+This is what the tool is *for*. For each row: if H lists 4 agencies but L has only 2 phone numbers, the finding is not a vague "60% complete" — it is:
+
+> Row 12 (Plaza `SEHATGANJ`): 4 agencies declared; `Contact of Toll Manager` missing at slots **3, 4**.
+
+Per-slot, per-column, actionable.
+
+### 2.5 Identity columns are immutable
+
+`A..E` are pre-filled by NHAI. If a response's values differ from the template's, the client has edited, re-sorted, or misaligned the sheet — every downstream comparison for that row is suspect. Flag as REVIEW rather than silently grading it.
 
 ---
 
-## 2. Repository layout
+## 3. Validation rules per column
 
-Create this skeleton (empty files are fine at first):
+| Col | Type | Valid | Invalid / flagged |
+|---|---|---|---|
+| F | COMPOSITE_LOCATION | Free text; **warn** if fewer than 4 comma/plus-separated components (village + chainage + city + pincode), or if no 6-digit pincode is present | empty, or still scaffold |
+| G | ENUM | One of `Public Funded`, `BOT`, `TOT`, `InvIT`, `MLFF` (case/spacing-insensitive; accept `Invit`/`INVIT`) | anything else → INVALID, near-miss → REVIEW |
+| H | TEXT | ≥3 chars, contains a letter | the literal word `Agency` → **scaffold, not data** |
+| I | ENUM | Matches `EQ` or `Regular` (accept `EQ (3 months)`, `3 months`, `Regular (1 Year)`, `1 year`) | anything else |
+| J | DATE_RANGE | Two dates, `DD/MM/YYYY - DD/MM/YYYY`. Accept `to`/`–`/`—` as separators. Both dates must parse, `start <= end`, and both should fall within `01/01/2021 – 14/01/2026` | `From (dd/mm/yyyy ) - To (dd/mm/yyyy)` → scaffold; single date → INVALID; out-of-window → REVIEW |
+| K, O | NAME | 2–80 chars, letters/space/`.`/`'`/`-`, Unicode-aware (Indian-script names must pass) | pure digits, punctuation only |
+| L | PHONE | 10 digits after stripping `+91`/`0091`/`0`/spaces/`-`/`()`; must start `6-9` | wrong length, non-digits, landline formats → INVALID with a shape reason |
+| M | ADDRESS | ≥10 chars, contains a letter | too short |
+| N, P | TEXT | ≥3 chars, contains a letter | — |
+| Q, R | NUMBER | Positive integer after stripping `,` and units (`veh`, `PCU`, `/day`) | non-numeric, negative |
+| S | TEXT (optional) | Any non-empty | never MISSING — optional |
+
+**Cross-slot rules (per row):**
+- **J chain continuity** — for slots ordered by start date, `end(k)` should equal `start(k+1)` (tolerance: ±1 day, to allow "ends 31/03, starts 01/04"). Violations → REVIEW with the gap/overlap described.
+- **J window coverage** — the union of contract ranges should cover `01/01/2021 – 14/01/2026`. Gaps → REVIEW.
+- **L duplicates** — the same phone for every agency is suspicious → REVIEW, not INVALID.
+
+---
+
+## 4. Reading messy responses
+
+The client will not respect the scaffold's formatting. The parser must absorb all of this:
+
+| What the client sends | How to read it |
+|---|---|
+| `1. ABC Ltd` / `1.ABC Ltd` / `1 . ABC Ltd` / `1) ABC Ltd` / `(1) ABC Ltd` | slot 1 = `ABC Ltd` |
+| `1. ABC Ltd, 2. DEF Ltd` on one line | slots 1, 2 — numbering wins over line breaks |
+| `ABC Ltd, DEF Ltd` (no numbering) | positional fallback → slots 1, 2 |
+| `ABC Ltd⏎DEF Ltd` (no numbering) | positional fallback → slots 1, 2 |
+| slots 1, 2, 4 filled; 3 blank | slot 3 explicitly absent — **preserve the gap** |
+| slots 7, 8 added beyond the scaffold | accept; N grows past 6 |
+| `9876543210 / 9876543211` | two values (slash separator, PHONE only) |
+| `₹2,50,000` in a NUMBER column | one value — never split on digit-internal commas |
+| `10/08/2026` in a DATE column | one value — never split on `/` |
+| non-breaking spaces, zero-width chars, `\r\n`, trailing whitespace | normalized away before parsing |
+| `N/A`, `NA`, `Nil`, `-`, `Not Applicable` | NOT_APPLICABLE, not a value |
+
+**Parsing order (`slot_parser.py`):**
+
+1. **Normalize** — NBSP→space, strip zero-width, `\r\n`/`\r`→`\n`, collapse 3+ blank lines, trim.
+2. **NA check** — whole cell matches an NA token → return the NA sentinel.
+3. **Scaffold check** — strip all numbering; if every remaining slot is empty **or** equals a known placeholder for that column, return "scaffold, unfilled" → MISSING.
+4. **Numbered parse** — find markers `^\s*(\d{1,2})\s*[.)\-:]\s*` (multiline). If ≥2 found, slice the text between consecutive markers and key by the parsed number. This handles out-of-order and skipped numbers.
+5. **Positional fallback** — no numbering: split on newline, then `;`, then type-permitted `,` / `/` (using the same digit-guard as v1: a comma between two digits is a thousands separator, not a separator). Assign slots `1..n` in order.
+6. **Per-slot cleanup** — strip the marker, quotes, trailing separator punctuation; drop values that are pure punctuation; map placeholder text to empty.
+7. **Cap** — refuse absurd slot numbers (>50) and absurd value counts; flag as REVIEW.
+
+---
+
+## 5. Status model
+
+Unchanged from v1 — `COMPLETE / PARTIAL / MISSING / INVALID / REVIEW / NOT_APPLICABLE` — but now evaluated at **three** levels.
+
+### 5.1 Cell level (one column of one row)
+
+Given `N` (row anchor), `D` (slots filled), `V` (valid), `I` (invalid):
+
+| # | Condition | Status | Completeness |
+|---|---|---|---|
+| 1 | Cell is unmodified scaffold, or empty | `MISSING` (`NOT_APPLICABLE` if column is optional) | 0.0 |
+| 2 | Cell is an NA token | `NOT_APPLICABLE` | — |
+| 3 | Row anchor `N == 0` (no agencies declared) | `MISSING` | 0.0 |
+| 4 | `D > 0` and `V == 0` | `INVALID` | 0.0 |
+| 5 | `V >= N` | `COMPLETE` | 1.0 |
+| 6 | `0 < V < N` | `PARTIAL` | `V / N` |
+| 7 | Identity column differs from template | `REVIEW` | — |
+
+`missing_count = max(N - V, 0)` — computed from **valid**, not detected. An invalid value does not fill its slot.
+
+### 5.2 Row level (one plaza)
+
+- `N` = agency count from column H
+- Per-column slot-gap list: which slot numbers are missing in each column
+- Row status = worst cell status, with `REVIEW` if identity columns were altered
+- Row completeness = `Σ valid across slotted columns / (N × number of slotted columns)`
+
+### 5.3 Sheet / workbook level
+
+Aggregate as in v1: totals for expected / valid / missing / invalid, cell-status counts, overall completeness. Rows where `N` is undefined are excluded from the completeness denominator and reported separately.
+
+---
+
+## 6. Module layout
 
 ```
 C:\excel automation\
 │
 ├── app/
-│   ├── __init__.py
-│   ├── models.py                  # Phase 2  — all dataclasses / enums
-│   ├── excel_reader.py            # Phase 1  — raw workbook → CellRecord[]
-│   ├── value_splitter.py          # Phase 3  — one cell string → value tokens
-│   ├── validators.py              # Phase 4  — per-type value validation
-│   ├── field_type_detector.py     # Phase 5  — label/context → FieldType
-│   ├── expected_count_detector.py # Phase 6  — label/context → E + confidence
-│   ├── template_analyzer.py       # Phase 7  — template workbook → FieldSpec[]
-│   ├── field_matcher.py           # Phase 8  — FieldSpec ↔ response cell
-│   ├── response_parser.py         # Phase 9  — response cell → ParsedValue[]
-│   ├── qc_engine.py               # Phase 10 — orchestrator + status rules
-│   ├── report_generator.py        # Phase 11 — QCResult[] → QC_Report.xlsx
-│   ├── semantic_analyzer.py       # Phase 15 — stub returning None until then
-│   ├── config.py                  # Phase 0  — config loading
-│   └── logging_utils.py           # Phase 0  — redaction-safe logging
+│   ├── config.py               KEEP    config loading                     ✅ built
+│   ├── logging_utils.py        KEEP    redaction-safe logging             ✅ built
+│   ├── excel_reader.py         KEEP    workbook → CellRecord[]            ✅ built
+│   ├── models.py               REWRITE slot-aware domain model
+│   ├── template_spec.py        NEW     the §1.3 column map, declarative
+│   ├── slot_parser.py          NEW     replaces value_splitter
+│   ├── validators.py           REWRITE per-column validators + ENUM/DATE_RANGE
+│   ├── row_matcher.py          NEW     replaces field_matcher (S.No/Plaza Name keyed)
+│   ├── response_parser.py      REWRITE slot-aware
+│   ├── consistency_checker.py  NEW     row-level cross-column checks
+│   ├── qc_engine.py            REWRITE cell + row + sheet levels
+│   └── report_generator.py     REWRITE new sheet layout
 │
-├── config/
-│   └── default.yaml
-│
+├── config/default.yaml
+├── template/Format.xlsx        the fixed template (committed)
 ├── tests/
-│   ├── __init__.py
-│   ├── conftest.py
-│   ├── make_synthetic.py          # Phase 13 — writes the test workbooks
-│   ├── test_value_splitter.py
-│   ├── test_validators.py
-│   ├── test_field_type_detector.py
-│   ├── test_expected_count_detector.py
-│   ├── test_qc_engine.py
-│   └── test_end_to_end.py
-│
-├── sample_data/                   # generated workbooks (git-ignored)
-├── output/                        # QC_Report.xlsx lands here (git-ignored)
-├── main.py                        # Phase 12 — CLI
-├── requirements.txt
-├── .gitignore
-├── BUILD_PLAN.md                  # this file
-└── README.md
+├── sample_data/                generated response variants (git-ignored)
+├── output/
+├── main.py                     CLI
+└── requirements.txt
 ```
 
-```powershell
-cd "C:\excel automation"
-New-Item -ItemType Directory -Force app,config,tests,sample_data,output | Out-Null
-```
+**Deleted** (obsoleted by having a fixed template):
+- `field_type_detector.py` — types now come from `template_spec.py`
+- `expected_count_detector.py` — N now comes from scaffold slots + the column-H anchor
+- `value_splitter.py` / `field_matcher.py` — superseded by `slot_parser.py` / `row_matcher.py`
+- `template_analyzer.py` — never written; `template_spec.py` replaces the idea entirely
+
+Their logic is not lost: the digit-guard comma rule, enumeration stripping, and the phone/amount/date validators all carry forward into the new modules. Recoverable from git commit `03c789c` if ever needed.
 
 ---
 
-## 3. Phase 0 — Config + safe logging
+## 7. Build phases
 
-### Goal
-Every knob lives in one file. Logging can never leak a cell value.
+Each phase has a **Done when** gate. Do not start a phase until the previous gate passes.
 
-### `config/default.yaml`
+### Phase A — `template_spec.py` (foundation)
 
-```yaml
-# ---- AI / semantic layer -------------------------------------------------
-ai:
-  enabled: false            # MUST stay false until Phase 15 is proven
-  provider: none            # none | bge | ollama
-  min_confidence_to_use: 0.75
-
-# ---- Expected count detection -------------------------------------------
-expected_count:
-  # When nothing at all suggests a count, do we assume 1 or return UNKNOWN?
-  assume_single_when_unknown: false
-  min_confidence_to_accept: 0.60
-  scan_radius: 3            # how many cells up/left to scan for instructions
-
-# ---- Status rules --------------------------------------------------------
-status:
-  oversupply_is_review: false   # D > E  -> COMPLETE (false) or REVIEW (true)
-  treat_blank_optional_as: MISSING   # MISSING | NOT_APPLICABLE
-  na_tokens: ["n/a", "na", "not applicable", "nil", "none", "-", "--"]
-
-# ---- Parsing -------------------------------------------------------------
-parsing:
-  max_values_per_cell: 500       # guardrail against pathological cells
-  strip_enumeration: true        # remove "1." "1)" "(1)" "•" "-" prefixes
-
-# ---- Validation ----------------------------------------------------------
-validation:
-  phone:
-    country: IN
-    allowed_lengths: [10]
-    allow_country_code: true      # +91 / 0091 / 91 prefix
-  amount:
-    currency_symbols: ["₹", "Rs.", "Rs", "INR", "INR."]
-    allow_indian_grouping: true   # 2,50,000
-  date:
-    formats: ["%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d.%m.%Y", "%d %b %Y", "%d %B %Y"]
-    dayfirst: true
-
-# ---- Security ------------------------------------------------------------
-security:
-  log_cell_values: false        # NEVER set true outside local debugging
-  redact_in_reports: false      # if true, Sheet 3 shows masked values
-```
-
-### `app/config.py`
+Declarative description of §1.3, plus the constants everything else reads:
 
 ```python
-def load_config(path: str | None = None) -> Config: ...
-```
-- Loads `config/default.yaml`, merges an optional override file, returns a frozen `Config` object (pydantic model or `SimpleNamespace`).
-- CLI flags override config values.
+SHEET_NAME       = "Data Sheet for UP STF"
+HEADER_ROW       = 2
+FIRST_DATA_ROW   = 3
+LAST_DATA_ROW    = 117
+SCAFFOLD_SLOTS   = 6            # soft cap
+ANCHOR_COLUMN    = "H"
+CONTRACT_WINDOW  = (date(2021,1,1), date(2026,1,14))
 
-### `app/logging_utils.py`
-
-```python
-def get_logger(name: str) -> logging.Logger: ...
-def redact(value: str, cfg) -> str: ...
-```
-- `redact` returns `"<redacted:len=12>"` unless `security.log_cell_values` is true.
-- **Rule: no `logger.*` call in the whole codebase may pass a raw cell value directly.** Always wrap in `redact()`.
-- Add a test that greps the source for suspicious logging (see Phase 14).
-
-### Done when
-- [ ] `load_config()` returns defaults
-- [ ] `redact("9876543210", cfg)` returns a masked string with default config
-
----
-
-## 4. Phase 1 — Excel reader
-
-### Goal
-Turn a workbook into a flat, uniform list of cell records — with merged-cell and structure awareness — so nothing downstream touches `openpyxl` directly.
-
-### `app/excel_reader.py`
-
-```python
-@dataclass
-class CellRecord:
-    sheet: str
-    cell: str                 # "D15"
-    row: int
-    col: int
-    raw_value: object | None  # str | int | float | datetime | None
-    text: str                 # normalized string form ("" if empty)
-    is_merged: bool
-    merge_anchor: str | None  # "D15" for every cell in the D15:F15 range
-    number_format: str
-    is_bold: bool
-    has_comment: bool
-    comment_text: str | None
-    data_validation: str | None   # formula1 of any DV rule on this cell
-
-def read_workbook(path: str) -> Workbook            # thin wrapper
-def read_cells(path: str) -> list[CellRecord]
-def build_index(cells) -> dict[tuple[str, str], CellRecord]   # (sheet, "D15") -> record
-```
-
-### What to build
-1. Open with `openpyxl.load_workbook(path, data_only=True)` — we want computed values, not formulas.
-   - Also open a second handle with `data_only=False` if you need to see formulas. Note in the record whether the value came from a cached formula result.
-2. **Merged cells**: build a map of every merged range. For each cell inside a range, set `is_merged=True` and `merge_anchor` to the top-left address. Only the anchor carries the value in openpyxl — propagate the anchor's text to members so lookups don't return empty.
-3. **Normalization** for `text`:
-   - `None` → `""`
-   - `datetime` → ISO string, but keep `raw_value` so date validation can shortcut
-   - float that is integral (`10.0`) → `"10"`
-   - Unify line endings `\r\n` and `\r` → `\n`
-   - Strip leading/trailing whitespace, collapse runs of 3+ blank lines
-   - **Do not** strip internal commas, currency symbols, or slashes here
-4. Capture `number_format` (a `₹#,##0` format is strong evidence of AMOUNT; `dd/mm/yyyy` of DATE).
-5. Capture cell comments and data validation rules — both are template hints.
-6. Skip fully empty trailing rows/columns so the record list stays small.
-
-### Done when
-- [ ] Reading a workbook with a merged `B2:D2` header returns the same `text` for `B2`, `C2`, and `D2`, with `merge_anchor == "B2"`
-- [ ] A cell holding a real date returns both a normalized string and the original `datetime`
-- [ ] `build_index` gives O(1) lookup by `(sheet, cell)`
-
----
-
-## 5. Phase 2 — Domain model
-
-### Goal
-One vocabulary the entire system shares. Write this before any logic so signatures stop churning.
-
-### `app/models.py`
-
-```python
-class FieldType(str, Enum):
-    PHONE = "PHONE"
-    NAME = "NAME"
-    EMAIL = "EMAIL"
-    AMOUNT = "AMOUNT"
-    DATE = "DATE"
-    ADDRESS = "ADDRESS"
-    LOCATION = "LOCATION"
-    NUMBER = "NUMBER"
-    PERCENTAGE = "PERCENTAGE"
-    CHAINAGE = "CHAINAGE"
-    COORDINATE = "COORDINATE"
-    YES_NO = "YES_NO"
-    TEXT = "TEXT"
-    DOCUMENT_REFERENCE = "DOCUMENT_REFERENCE"
-    UNKNOWN = "UNKNOWN"
-```
-
-> **Extensibility requirement (§6):** `FieldType` must not be a closed universe. Register each type in a `TYPE_REGISTRY` dict that maps `FieldType -> TypeProfile`, where `TypeProfile` carries its keyword patterns, its allowed separators, and its validator. Adding a new type = adding one registry entry, touching no other file.
-
-```python
-@dataclass
-class TypeProfile:
-    type: FieldType
-    label_keywords: list[str]        # for field_type_detector
-    label_patterns: list[str]        # regex, higher precision than keywords
-    allowed_separators: list[str]    # subset of ["\n", ";", "|", ",", "/"]
-    forbidden_separators: list[str]  # e.g. AMOUNT forbids ",", DATE forbids "/" and "-"
-    validator: Callable[[str, Config], ValueVerdict]
-    plural_hint: bool                # does a plural label imply multi-value?
-```
-
-```python
-class Status(str, Enum):
-    COMPLETE = "COMPLETE"
-    PARTIAL = "PARTIAL"
-    MISSING = "MISSING"
-    INVALID = "INVALID"
-    REVIEW = "REVIEW"
-    NOT_APPLICABLE = "NOT_APPLICABLE"
-
-class CountSource(str, Enum):
-    EXPLICIT_INSTRUCTION = "explicit_instruction"
-    NUMBERED_RANGE = "numbered_range"
-    ENUMERATED_LABELS = "enumerated_labels"
-    TABLE_ROWS = "table_rows"
-    DATA_VALIDATION = "data_validation"
-    SINGULAR_LABEL = "singular_label"
-    SEMANTIC = "semantic"
-    UNKNOWN = "unknown"
-
-@dataclass
-class ExpectedCount:
-    count: int | None
-    source: CountSource
-    confidence: float          # 0.0 - 1.0
-    evidence: str              # short human-readable justification, no client data
-
-@dataclass
-class FieldSpec:                     # the internal template schema, §18
-    sheet: str
-    cell: str
-    field_name: str
-    field_type: FieldType
-    field_type_confidence: float
-    expected: ExpectedCount
+@dataclass(frozen=True)
+class ColumnSpec:
+    letter: str
+    header: str                 # verbatim from the template, for verification
+    role: Role                  # KEY | INPUT
+    value_type: ValueType
+    slotted: bool
     required: bool
-    source: str                      # where field_name came from
-    context_text: str                # the instruction text we harvested
+    placeholders: tuple[str,...]   # e.g. ("Agency",) for H
+    enum_values: tuple[str,...]    # for G, I
 
-@dataclass
-class ValueVerdict:
-    is_valid: bool
-    normalized: str | None           # canonical form (e.g. 250000 for ₹2,50,000)
-    reason: str                      # "", or "too short: 4 digits, expected 10"
-
-@dataclass
-class ParsedValue:
-    index: int                       # 1-based position in the cell
-    raw: str
-    verdict: ValueVerdict
-
-@dataclass
-class QCResult:                      # §19
-    sheet: str
-    cell: str
-    field_name: str
-    field_type: FieldType
-    expected_count: int | None
-    detected_count: int
-    valid_count: int
-    invalid_count: int
-    missing_count: int
-    completeness: float | None
-    status: Status
-    confidence: float
-    reason: str
-    values: list[ParsedValue]
+COLUMNS: dict[str, ColumnSpec] = { ... 19 entries ... }
 ```
 
-### Done when
-- [ ] `python -c "from app.models import *"` succeeds
-- [ ] `TYPE_REGISTRY` has an entry for every `FieldType` member (assert this in a test)
-
----
-
-## 6. Phase 3 — Value splitter (the hard part)
-
-### Goal
-Split one cell's text into value tokens **without** breaking `₹2,50,000` or `10/08/2026`.
-
-### `app/value_splitter.py`
-
-```python
-def split_values(text: str, field_type: FieldType, cfg) -> list[str]
-def strip_enumeration(token: str) -> str
-def detect_separator(text: str, profile: TypeProfile) -> str | None
-```
-
-### The algorithm — follow this order exactly
-
-**Step 1 — Early exits**
-- `text.strip() == ""` → return `[]`
-- `text.strip().lower()` in `cfg.status.na_tokens` → return `["__NA__"]` (sentinel; the engine turns this into `NOT_APPLICABLE`)
-
-**Step 2 — Look up the type profile**
-Get `allowed_separators` / `forbidden_separators` from `TYPE_REGISTRY[field_type]`.
-
-| Type | Allowed separators | Forbidden | Note |
-|---|---|---|---|
-| PHONE | `\n` `;` `,` `\|` `/` | — | digits can't contain these |
-| EMAIL | `\n` `;` `,` `\|` | `/` | — |
-| AMOUNT | `\n` `;` `\|` `,` | `/` `.` | `,` is allowed but only ever splits via the digit-guard rule below, so `₹2,50,000` stays one token |
-| DATE | `\n` `;` `,` `\|` | `/` `-` `.` | `10/08/2026`, `10-08-2026` |
-| NAME | `\n` `;` `\|` `,` | `/` | `,` allowed — names rarely contain commas |
-| ADDRESS | `\n` `;` `\|` | `,` `/` | **addresses are full of commas** |
-| LOCATION | `\n` `;` `\|` | `,` | same reasoning as ADDRESS |
-| NUMBER | `\n` `;` `\|` `,` | `/` `.` | `,` via digit-guard |
-| PERCENTAGE | `\n` `;` `,` `\|` | `/` | — |
-| CHAINAGE | `\n` `;` `,` `\|` | `/` `+` | `km 12+300` keeps its `+` |
-| COORDINATE | `\n` `;` `\|` | `,` | `17.3850, 78.4867` is ONE coordinate pair |
-| YES_NO | `\n` `;` `,` `\|` | — | — |
-| TEXT / UNKNOWN | `\n` `;` | `,` `/` | conservative: prose contains commas |
-| DOCUMENT_REFERENCE | `\n` `;` `,` `\|` | `/` | `NH-16/2024/ROW-01` is one ref |
-
-**Step 3 — Separator precedence.** Try in this order and take the **first** that produces ≥ 2 non-empty tokens:
-
-```
-1. "\n"      (newline — strongest, least ambiguous)
-2. ";"
-3. "|"
-4. ","       (only if allowed AND passes the digit-guard)
-5. "/"       (only if allowed)
-```
-
-Rationale: a cell using newlines *and* commas (`9876543210,\n9876543211,`) should split on newlines, then have stray trailing commas stripped in Step 5 — not split twice.
-
-**Step 4 — The digit-guard for comma.**
-Even when `,` is allowed, refuse it if the comma is digit-internal:
-
-```python
-DIGIT_INTERNAL_COMMA = re.compile(r"(?<=\d),(?=\d)")
-```
-- If **every** comma in the text matches `DIGIT_INTERNAL_COMMA`, the comma is a thousands separator → **do not split on it**.
-- If some do and some don't (`₹2,50,000, ₹3,00,000`), split only on commas that are **not** digit-internal. Implement with `re.split(r"(?<!\d),|,(?!\d)", text)` and verify against the AMOUNT tests.
-- Same guard applies to `.` for decimals, and to `/` for dates.
-
-**Step 5 — Clean each token**
-1. `strip_enumeration` — remove a leading enumeration marker:
-   ```
-   ^\s*(\(?\d{1,3}[\.\)\-:]|\d{1,3}\s*[\.\)]|[•·▪\-\*\u2022]|\(?[a-zA-Z][\.\)]|\(?[ivxIVX]+[\.\)])\s+
-   ```
-   Guard: do **not** strip when the field type is NUMBER/AMOUNT and the "marker" is the value itself. Rule of thumb — only strip if something remains after stripping.
-2. Strip surrounding quotes and whitespace.
-3. Strip trailing separators (`,` `;` `.` at the very end of a token).
-4. Drop tokens that are now empty or are pure punctuation.
-
-**Step 6 — Guardrail**
-If `len(tokens) > cfg.parsing.max_values_per_cell`, truncate and set a `reason` the engine will surface as `REVIEW`.
-
-**Step 7 — Single-value fallback**
-If no separator produced ≥2 tokens, return `[cleaned_text]` — one value.
-
-### Tests to write now (`tests/test_value_splitter.py`)
-
-| Input | Type | Expected output |
-|---|---|---|
-| `"9876543210, 9876543211, 9876543212"` | PHONE | 3 tokens |
-| `"9876543210\n9876543211\n9876543212"` | PHONE | 3 tokens |
-| `"1. 9876543210\n2. 9876543211"` | PHONE | `["9876543210", "9876543211"]` |
-| `"9876543210;\n9876543211;"` | PHONE | 2 tokens, no trailing `;` |
-| `"₹2,50,000"` | AMOUNT | **1 token** |
-| `"₹2,50,000\n₹3,00,000"` | AMOUNT | 2 tokens |
-| `"₹2,50,000, ₹3,00,000"` | AMOUNT | 2 tokens |
-| `"10/08/2026"` | DATE | **1 token** |
-| `"10/08/2026, 11/08/2026"` | DATE | 2 tokens |
-| `"H.No 12-3, Main Road, Nellore"` | ADDRESS | **1 token** |
-| `"17.3850, 78.4867"` | COORDINATE | **1 token** |
-| `"km 12+300, km 14+500"` | CHAINAGE | 2 tokens |
-| `""` / `"   "` | any | `[]` |
-| `"N/A"` | any | `["__NA__"]` |
-| `"• Rahul Sharma\n• Amit Kumar"` | NAME | 2 clean names |
-
-### Done when
-- [ ] Every row above passes
-- [ ] `pytest tests/test_value_splitter.py` is green
-
----
-
-## 7. Phase 4 — Validators
-
-### Goal
-Decide, per value, valid vs invalid — and produce a normalized canonical form.
-
-### `app/validators.py`
-
-Each validator has the signature `(value: str, cfg) -> ValueVerdict`.
-
-| Type | Rule | Invalid examples |
-|---|---|---|
-| **PHONE** | Strip `+91`/`0091`/`91`/leading `0`, spaces, `-`, `(`, `)`. Remaining must be exactly 10 digits and start with `6-9` (India). `normalized` = the 10 digits. | `9876` (4 digits), `98765432101` (11), `abcdefghij` |
-| **EMAIL** | `^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$`, lowercase the domain | `rahul@`, `rahul.example.com` |
-| **AMOUNT** | Strip currency symbols/words, strip grouping commas, allow one decimal point. Must parse to a positive number. `normalized` = plain number string. | `abc`, `₹`, `-500` (config: allow negatives?) |
-| **DATE** | Try each format in `cfg.validation.date.formats` with `dateutil` as a fallback, `dayfirst=True`. Reject impossible dates (`32/13/2026`). `normalized` = ISO `YYYY-MM-DD`. | `32/13/2026`, `tomorrow` |
-| **NAME** | 2–80 chars, only letters, spaces, `.`, `'`, `-`. At least one letter. Reject pure digits, reject strings that are 80% digits. Title-case the normalized form. | `12345`, `-`, `@#$` |
-| **NUMBER** | Parses to int/float after stripping grouping | `abc` |
-| **PERCENTAGE** | Number 0–100, optional `%` | `150%`, `abc%` |
-| **YES_NO** | In `{yes, no, y, n, true, false, ✓, ✗}` (case-insensitive) | `maybe` |
-| **CHAINAGE** | `(km\s*)?\d+\s*\+\s*\d{1,3}` or plain decimal km | `abc` |
-| **COORDINATE** | Two floats, lat ∈ [-90,90], lon ∈ [-180,180]. Accept `17.3850, 78.4867` and DMS (`17°23'06"N`). | `17.3850` alone, `200, 300` |
-| **ADDRESS / LOCATION** | ≥ 5 chars, contains at least one letter. Deliberately permissive. | `-`, `12` |
-| **DOCUMENT_REFERENCE** | ≥ 3 chars, alphanumeric with `-`/`/` allowed | `-` |
-| **TEXT / UNKNOWN** | Non-empty after strip → valid. Never invalid on format. | — |
-
-**Rules that apply to all validators:**
-- Never raise. Always return a `ValueVerdict`.
-- `reason` must be short and must **not** echo the value (it goes into the report; the report has its own value column). Use shape descriptions: `"expected 10 digits, got 4"`.
-- Register each validator in `TYPE_REGISTRY` — no `if/elif` chain on type anywhere outside the registry lookup.
-
-### Done when
-- [ ] `tests/test_validators.py` covers every type with ≥2 valid and ≥2 invalid cases
-- [ ] `validate("₹2,50,000", AMOUNT).normalized == "250000"`
-- [ ] `validate("+91 98765 43210", PHONE).normalized == "9876543210"`
-
----
-
-## 8. Phase 5 — Field type detector
-
-### Goal
-Given a field's label and surrounding context, infer `FieldType` with a confidence score. **No hardcoded field list** — this is keyword/pattern scoring driven by the registry.
-
-### `app/field_type_detector.py`
-
-```python
-def detect_field_type(label: str, context: str, cell: CellRecord, cfg) -> tuple[FieldType, float]
-```
-
-### Evidence sources, in descending weight
-
-1. **Number format** (weight 0.9) — `₹#,##0` → AMOUNT; `dd/mm/yyyy` → DATE; `0.00%` → PERCENTAGE. Strongest signal because it's structural, not linguistic.
-2. **Data validation rule** (0.85) — a list DV of `Yes,No` → YES_NO; a date DV → DATE.
-3. **Label regex patterns** (0.8) — from `TypeProfile.label_patterns`, e.g.
-   - PHONE: `\b(phone|mobile|contact\s*(no|number)|cell|whatsapp|tel)\b`
-   - AMOUNT: `\b(amount|compensation|cost|value|price|payment|₹|rs\.?|inr)\b`
-   - DATE: `\b(date|dated|dt\.?|as\s+on|deadline|d\.o\.b)\b`
-   - NAME: `\b(name|person|owner|beneficiary|contractor|applicant)\b`
-   - ADDRESS: `\b(address|residence|door\s*no|h\.?\s*no)\b`
-   - CHAINAGE: `\b(chainage|ch\.?|km\b)`
-   - COORDINATE: `\b(coordinate|lat|long|latitude|longitude|gps)\b`
-   - EMAIL: `\b(e-?mail|mail\s*id)\b`
-   - and so on for every registered type
-4. **Label keywords** (0.6) — plain substring hits from `TypeProfile.label_keywords`
-5. **Context text** — the same patterns applied to instruction text near the cell, at **0.7× the weight** of a label hit
-6. **Sample-value sniffing** (0.5) — if the template contains an example value, run it through validators and see which type accepts it
-
-### Scoring
-- Sum weighted hits per type, take the argmax
-- Confidence = `top_score / (top_score + runner_up_score)`, clamped to `[0, 1]`
-- If `top_score == 0` → `(FieldType.UNKNOWN, 0.0)`
-- If confidence `< 0.5` and two types tie → return the more permissive one (TEXT) and record low confidence; the engine will lean toward `REVIEW`
-
-Ties like "Contact Details" (PHONE? ADDRESS? EMAIL?) are exactly the case the Phase-15 semantic layer is for. Until then: low confidence → `REVIEW`.
-
-### Done when
-- [ ] `"Contact Numbers"` → PHONE, conf ≥ 0.7
-- [ ] `"Compensation Amount (₹)"` → AMOUNT, conf ≥ 0.7
-- [ ] `"Remarks"` → TEXT
-- [ ] `"Xyzzy"` → UNKNOWN, conf 0.0
-- [ ] A cell with number format `₹#,##0` and label `"Value"` → AMOUNT
-
----
-
-## 9. Phase 6 — Expected count detector
-
-### Goal
-Requirement §17. Determine `E` with a source and confidence — or honestly return `None`.
-
-### `app/expected_count_detector.py`
-
-```python
-def detect_expected_count(field_label: str,
-                          context_cells: list[CellRecord],
-                          sheet_cells: list[CellRecord],
-                          cell: CellRecord,
-                          cfg) -> ExpectedCount
-```
+**Done when:** a test loads `template/Format.xlsx` and asserts every `ColumnSpec.header` matches the real header text in row 2 exactly, and that `LAST_DATA_ROW`/row count match. This test is the tripwire that fires if the template is ever silently changed.
 
-### Detection strategies, in priority order — first confident hit wins
+### Phase B — `models.py` rewrite
 
-**1. Explicit quantity in instruction text → confidence 0.95–0.99, source `EXPLICIT_INSTRUCTION`**
+`SlotValue(slot, raw, verdict)` · `CellResult` (with `slot_values`, `missing_slots`) · `RowResult` (with `n_contracts`, `per_column`, `consistency_findings`) · `SheetSummary` · `QCRun`. Statuses and `ValueVerdict` carry over unchanged.
 
-Search label + context + cell comment for:
-```python
-r"\b(?:provide|give|enter|list|furnish|attach|mention|fill)\s+(?:any\s+|all\s+)?(\d{1,3})\b"
-r"\b(\d{1,3})\s*(?:nos?\.?|numbers?|values?|entries|items|persons?|records?)\b"
-r"\(\s*(\d{1,3})\s*(?:nos?\.?)?\s*\)"
-r"\b(?:minimum|min\.?|at\s+least)\s+(\d{1,3})\b"      # confidence 0.85, this is a floor
-r"\b(?:maximum|max\.?|up\s+to|not\s+more\s+than)\s+(\d{1,3})\b"   # confidence 0.70, a ceiling
-r"\btop\s+(\d{1,3})\b"
-```
-Also map number words: `one..twenty` → 1..20, plus `ten`, `dozen` → 12.
+**Done when:** imports clean; every `ValueType` has a validator registered.
 
-> **Semantics matter:** "at least 5" means `E = 5` and supplying 8 is COMPLETE. "up to 5" means supplying 3 is *also* COMPLETE. Record this in `ExpectedCount.evidence` as `bound="min"|"max"|"exact"` and have `qc_engine` honor it. Add a `bound` field to `ExpectedCount`.
+### Phase C — `slot_parser.py`
 
-**2. Numbered range → 0.90, source `NUMBERED_RANGE`**
-```python
-r"\b(\d{1,3})\s*(?:-|–|to)\s*(\d{1,3})\b"      # "1-10", "1 to 10"
-r"\bS\.?\s*No\.?\s*(\d{1,3})\s*(?:-|to)\s*(\d{1,3})\b"
-```
-`E = hi - lo + 1`. Sanity-check `1 <= lo < hi <= 500`.
+The §4 algorithm. **The highest-risk module — write its tests first**, using the exact scaffold strings from §1.4 as fixtures.
 
-**3. Enumerated labels → 0.90, source `ENUMERATED_LABELS`**
-Scan the sheet for a run of sibling cells (same column, consecutive rows — or same row, consecutive columns) whose text matches `^(.*?)\s*(\d{1,3})$` with an identical prefix: `Person 1`, `Person 2`, … `Person 10`. `E` = highest trailing number. Require ≥ 3 members before trusting the pattern.
+**Done when:** every row of §4's table passes, and the verbatim template scaffold for each of `H..R` is classified as *unfilled*, not as 6 values.
 
-**4. Table rows → 0.80, source `TABLE_ROWS`**
-If the field is a **column header** and the template has a bounded, pre-formatted table under it (N rows with borders / an S.No column filled 1..N / a shaded band), then `E = N`. Detect the block by walking down until you hit an unstyled empty row.
+### Phase D — `validators.py` rewrite
 
-**5. Data validation / list constraint → 0.65, source `DATA_VALIDATION`**
-Rare, but a DV rule capping entries is evidence.
+The §3 table. Adds `ENUM` (fuzzy-tolerant), `DATE_RANGE`, `COMPOSITE_LOCATION`; keeps PHONE/NAME/NUMBER/ADDRESS/TEXT from v1.
 
-**6. Singular-label heuristic → 0.55, source `SINGULAR_LABEL`**
-Only if `cfg.expected_count.assume_single_when_unknown` is **true**. Label is grammatically singular (`Project Name`, `Date of Award`), has no quantity words, no plural noun, and the cell is small/single-line → `E = 1`.
-With the default config (`false`) this strategy is **skipped**, and such fields land in `UNKNOWN` → `REVIEW`. That is deliberate: it is safer to ask a human than to invent a `1`.
+**Done when:** ≥2 valid and ≥2 invalid cases per type; no validator raises on any input; no `reason` string echoes a client value.
 
-**7. Otherwise → `ExpectedCount(count=None, source=UNKNOWN, confidence=0.20, evidence="no quantity signal found")`**
+### Phase E — `row_matcher.py`
 
-### Hard rules
-- Never fabricate a number. If confidence < `cfg.expected_count.min_confidence_to_accept`, return `count=None`.
-- Cap at a sane maximum (say 500); a parsed `E = 9999` is a false positive — return `None` with evidence noting the rejection.
-- `evidence` must be a short template-derived phrase — it comes from the *template*, not the client response, so it is safe to include in the report.
+Match template rows to response rows by S.No, then Plaza Name, then row position. Detect inserted/deleted/re-ordered rows. Verify identity columns `A..E` and report mismatches.
 
-### Done when
-- [ ] `"Provide 10 contact numbers"` → `count=10, source=explicit_instruction, confidence>=0.95`
-- [ ] `"S.No. 1-10"` → `count=10, source=numbered_range`
-- [ ] Sheet with `Person 1 … Person 10` → `count=10, source=enumerated_labels`
-- [ ] `"Details"` with no context → `count=None, source=unknown, confidence≈0.20`
-- [ ] `"at least 5"` → `count=5, bound="min"`
+**Done when:** identical workbook → 115/115 matched by S.No; a workbook with 2 rows inserted at the top still matches 115/115; an edited Plaza Name is reported as an identity mismatch.
 
----
+### Phase F — `response_parser.py` + `consistency_checker.py`
 
-## 10. Phase 7 — Template analyzer
+Parser: per cell, produce `{slot → SlotValue}` with verdicts. Checker: per row, compute `N` from H, then for every slotted column list the missing slot numbers; run the J chain-continuity and window-coverage checks; flag duplicate phones.
 
-### Goal
-Walk the template workbook and emit `list[FieldSpec]` — the internal schema of §18.
+**Done when:** the §2.4 worked example reproduces exactly — 4 agencies, phones at slots 1–2 → `missing_slots == [3, 4]`.
 
-### `app/template_analyzer.py`
+### Phase G — `qc_engine.py`
 
-```python
-def analyze_template(path: str, cfg) -> list[FieldSpec]
-def find_label_for(cell: CellRecord, index, cells, cfg) -> tuple[str, str]  # (label, source)
-def harvest_context(cell: CellRecord, cells, cfg) -> str
-```
+The §5 tables at all three levels, plus aggregation.
 
-### What to build
+**Done when:** every row of the §5.1 table is asserted; a fully-scaffold (untouched) workbook scores **0%**, not 100%; a fully-correct workbook scores 100%.
 
-**Step 1 — Classify each cell as LABEL / INSTRUCTION / INPUT / DECORATION**
-- **LABEL**: bold, or in a header row/column, or shaded, and has text
-- **INSTRUCTION**: long text (> 40 chars) containing an imperative verb (`provide`, `enter`, `list`, `attach`) or a quantity
-- **INPUT**: empty, or has a border/fill marking it as fillable, or sits under a header inside a table body, or has data validation
-- **DECORATION**: everything else (titles, page numbers, blank spacers)
+### Phase H — `report_generator.py`
 
-**Step 2 — For each INPUT cell, find its label** in this order:
-1. Column header — walk up the same column to the nearest LABEL cell
-2. Row label — walk left along the same row to the nearest LABEL cell
-3. Merged-block header directly above
-4. The cell's own text if it is a `Label:` prefix pattern
-5. Cell comment
-6. If nothing → `field_name = "<sheet>!<cell>"`, `source = "coordinate"`, and mark the spec low-confidence
+`QC_Report.xlsx`:
 
-Record which strategy won in `FieldSpec.source`.
+1. **Summary** — run metadata + workbook totals + overall completeness
+2. **Row Analysis** — one row per plaza: S.No, Plaza Name, RO, PIU, N, row status, completeness, count of problem columns
+3. **Cell Analysis** — one row per (plaza × column): expected N, filled, valid, invalid, missing slot numbers, status, reason
+4. **Slot Analysis** — one row per individual value: plaza, column, slot #, value, VALID/INVALID, reason
+5. **Consistency Findings** — cross-column and date-chain problems, most severe first
 
-**Step 3 — Harvest context** — concatenate, within `cfg.expected_count.scan_radius` cells: the header, the row label, any INSTRUCTION cell in the same row/column band, the sheet's top-of-sheet instruction block, and the cell comment. This string feeds both the type detector and the count detector.
+Status colour-coding, frozen headers, autofilter, real `0.0%` number formats. Honour `security.redact_in_reports`.
 
-**Step 4 — Call the detectors** to fill `field_type` and `expected`.
+**Done when:** opens in Excel with no repair prompt; all five sheets present; completeness sorts numerically.
 
-**Step 5 — Decide `required`** — default `True`. Set `False` if the label/context contains `optional`, `if any`, `if applicable`, `(optional)`.
-
-**Step 6 — Deduplicate** — one `FieldSpec` per merged range (use the anchor), never one per merged member.
-
-### Done when
-- [ ] Running against the synthetic template produces one `FieldSpec` per intended question — no more, no less
-- [ ] `FieldSpec` for the Contact Numbers cell matches §18's example exactly (sheet, cell, name, type, expected 10, confidence, required, source)
-- [ ] Dumping the specs to JSON is human-reviewable — add `--dump-schema schema.json` to the CLI in Phase 12
-
----
-
-## 11. Phase 8 — Field matcher
-
-### Goal
-Pair each template `FieldSpec` with the corresponding cell in the client response.
-
-### `app/field_matcher.py`
-
-```python
-def match_fields(specs: list[FieldSpec], response_cells, cfg) -> list[tuple[FieldSpec, CellRecord | None]]
-```
-
-### Strategy ladder — stop at the first that succeeds
-
-1. **Exact coordinate** — same sheet name, same cell address. This is the normal case and should cover ~100% when the client fills the template in place.
-2. **Sheet-name normalization** — trim, casefold, collapse whitespace (`"Contact Details "` vs `"contact details"`).
-3. **Sheet index fallback** — same position in the workbook if names diverge, but only when sheet counts match. Log a warning.
-4. **Label-based** — find a cell in the response sheet whose resolved label normalizes to the same string, then take its input cell. Handles inserted/deleted rows.
-5. **Row-offset detection** — if many fields on a sheet fail coordinate matching by a constant offset (client inserted 2 rows), detect the modal offset and re-try coordinate matching with it.
-6. **Unmatched** → `(spec, None)`. The engine records `Status.MISSING` with reason `"field not found in response workbook"` — **not** `REVIEW`, because the absence is itself the finding.
-
-Also report the inverse: response cells with content that no `FieldSpec` claims. Surface these in the report as `extra_response_cells` (informational). Cap the list.
-
-### Done when
-- [ ] Identical-shape workbooks → 100% coordinate matches
-- [ ] A response with 2 extra rows inserted at the top still matches via strategy 5
-- [ ] A renamed sheet still matches via strategy 2 or 3
-
----
-
-## 12. Phase 9 — Response parser
-
-### Goal
-Take a matched response cell + its `FieldSpec` and produce `list[ParsedValue]`.
-
-### `app/response_parser.py`
-
-```python
-def parse_response(spec: FieldSpec, cell: CellRecord | None, cfg) -> tuple[list[ParsedValue], str]
-```
-Returns the values plus a `note` string (e.g. `"truncated at 500 values"`).
-
-### Flow
-1. No cell, or empty text → `([], "")`
-2. `split_values(cell.text, spec.field_type, cfg)` → tokens
-3. If tokens == `["__NA__"]` → return a single `ParsedValue` flagged as the NA sentinel
-4. Validate each token via `TYPE_REGISTRY[spec.field_type].validator`
-5. **Deduplicate**: identical `normalized` values are a real QC signal. Mark duplicates as `is_valid=False, reason="duplicate of value #N"` — a client pasting the same phone number 10 times has not provided 10 phone numbers. Make this behavior a config flag `parsing.duplicates_are_invalid` (default `true`).
-6. Assign 1-based `index`
-
-### Done when
-- [ ] `"9876543210\n9876543211\n9876\n9876543213"` with PHONE → 4 parsed, 3 valid, 1 invalid
-- [ ] Repeating the same number 5× yields 1 valid + 4 duplicate-invalid
-
----
-
-## 13. Phase 10 — QC engine
-
-### Goal
-Orchestrate everything and apply the status rules. **This is where §14/§15 live — get the table exactly right.**
-
-### `app/qc_engine.py`
-
-```python
-def run_qc(template_path: str, response_path: str, cfg) -> QCRun
-def decide_status(E, D, V, I, spec, cfg) -> tuple[Status, float, str]
-```
-
-### The status decision table — evaluate top to bottom, first match wins
-
-| # | Condition | Status | Completeness | Reason template |
-|---|---|---|---|---|
-| 1 | Response cell not found | `MISSING` | 0.0 | `field not present in response workbook` |
-| 2 | Only value is the NA sentinel | `NOT_APPLICABLE` | `None` | `client marked not applicable` |
-| 3 | `D == 0` and `spec.required` | `MISSING` | 0.0 | `no response provided; expected {E or 'unknown'}` |
-| 4 | `D == 0` and not required | per `cfg.status.treat_blank_optional_as` | 0.0 | `optional field left blank` |
-| 5 | `E is None` and `D > 0` and `V == 0` | `INVALID` | `None` | `{D} values provided, none valid` |
-| 6 | `E is None` and `D > 0` | `REVIEW` | `None` | `expected count unknown; {V} valid of {D} provided` |
-| 7 | `V == 0` and `D > 0` | `INVALID` | 0.0 | `{D} values provided, none valid for type {type}` |
-| 8 | `bound == "max"` and `V <= E` and `V > 0` | `COMPLETE` | `min(V/E,1)` | `within maximum of {E}` |
-| 9 | `V >= E` and `D > E` and `cfg.status.oversupply_is_review` | `REVIEW` | 1.0 | `{D} values provided, {E} expected` |
-| 10 | `V >= E` | `COMPLETE` | 1.0 | `all {E} expected values valid` |
-| 11 | `0 < V < E` | `PARTIAL` | `V / E` | `{V} valid of {E} expected; {M} missing` |
-| 12 | fallback | `REVIEW` | `None` | `unhandled combination` |
-
-**Derived counts:**
-```python
-M = max(E - V, 0) if E is not None else None
-completeness = min(V / E, 1.0) if (E and E > 0) else None
-```
-Note: **`M` is computed from `V`, not `D`.** §7's second example is the proof: E=10, D=4, V=3, I=1 → M=7. Invalid values do not reduce the missing count.
-
-**Result confidence** = the minimum of `spec.field_type_confidence` and `spec.expected.confidence`, further reduced if the field matcher used a fallback strategy. When confidence < 0.5, **upgrade** the status to `REVIEW` unless it's already `MISSING` (a blank is a blank regardless of confidence).
-
-### Aggregation
-Build `QCRun` holding: `results: list[QCResult]`, per-sheet rollups, and a workbook-level summary. Sum `E`, `V`, `M`, `I` across all results where `E is not None`; overall completeness = `total_V / total_E`. Cells with `E is None` are counted separately as `review_cells` and excluded from the completeness denominator (document this in the report so the number isn't misread).
-
-### Done when
-- [ ] `tests/test_qc_engine.py` asserts every row of the table above with a synthetic `FieldSpec`
-- [ ] §13's worked example reproduces exactly: E=10, D=6, V=5, I=1, M=5, completeness=0.50, PARTIAL
-- [ ] §19's first example reproduces exactly: E=10, D=6, V=6, I=0, M=4, completeness=0.60, PARTIAL
-
----
-
-## 14. Phase 11 — Report generator
-
-### Goal
-Write `QC_Report.xlsx` with the four sheets from §20.
-
-### `app/report_generator.py`
-
-```python
-def generate_report(run: QCRun, output_path: str, cfg) -> None
-```
-
-**Sheet 1 — Summary**
-Total Sheets · Total Cells Checked · Total Expected Responses · Total Valid · Total Missing · Total Invalid · Complete Cells · Partial Cells · Missing Cells · Invalid Cells · Review Cells · Not Applicable Cells · Overall Completeness %
-Plus a metadata block: template filename, response filename, run timestamp, config profile, engine version, AI enabled yes/no.
-
-**Sheet 2 — Cell Analysis**
-`Sheet | Cell | Field / Column | Field Type | Expected Count | Detected Count | Valid Count | Invalid Count | Missing Count | Completeness % | Status | Confidence | Reason`
-Show `UNKNOWN` (not blank) when `E is None`.
-
-**Sheet 3 — Value Analysis**
-`Sheet | Cell | Field | Value | Value Index | Validation Status | Reason`
-One row per parsed value. Honor `cfg.security.redact_in_reports` — when true, mask values (`98765*****`).
-
-**Sheet 4 — Sheet Summary**
-`Sheet | Expected Responses | Valid Responses | Missing | Invalid | Partial Cells | Complete Cells | Completeness %`
-
-### Formatting
-- Freeze the header row, bold headers, autofilter on all data sheets
-- Conditional fill by status: COMPLETE green, PARTIAL amber, MISSING red, INVALID dark red, REVIEW blue, NOT_APPLICABLE grey
-- Completeness as a real percentage number format (`0.0%`), not a string — so the client can sort/filter it
-- Column widths sized to content, capped at ~60 chars
-- Write with `openpyxl.Workbook()` in `write_only` mode if reports get large
-
-### Done when
-- [ ] The report opens in Excel with no repair prompt
-- [ ] All four sheets present with the exact column headers from §20
-- [ ] Completeness cells sort numerically
-
----
-
-## 15. Phase 12 — CLI
-
-### `main.py`
+### Phase I — `main.py` CLI
 
 ```powershell
-python main.py --template sample_data/template.xlsx --response sample_data/response.xlsx --output output/QC_Report.xlsx
+python main.py --response "client_reply.xlsx" --output "output/QC_Report.xlsx"
 ```
 
-**Flags:**
-| Flag | Purpose |
+`--template` defaults to `template/Format.xlsx` (it's fixed and committed). Other flags: `--config`, `--strict`, `--quiet`, `-v`, `--dump-json`.
+
+Handle: file not found, `.xls`, password-protected, response is actually the blank template, wrong sheet name.
+
+**Done when:** end-to-end run on synthetic responses; clear errors + exit code 2 on bad input, never a traceback.
+
+### Phase J — synthetic responses + full test suite
+
+Generate from the real template (copy it, fill it) into `sample_data/`:
+
+| Variant | Expectation |
 |---|---|
-| `--template` | required |
-| `--response` | required |
-| `--output` | default `output/QC_Report.xlsx` |
-| `--config` | override YAML path |
-| `--no-ai` | force `ai.enabled=false` (redundant today, meaningful from Phase 15) |
-| `--dump-schema PATH` | write the inferred `FieldSpec[]` to JSON for human review |
-| `--strict` | exit code 1 if any `REVIEW` or `MISSING` cells exist |
-| `--quiet` | summary line only |
-| `-v/--verbose` | debug logging (still redacted) |
+| `untouched.xlsx` | template as-is → **0%**, all MISSING |
+| `perfect.xlsx` | 3 agencies × all columns consistent → 100% COMPLETE |
+| `ragged.xlsx` | H=4 agencies, L=2 phones, K=3 names → PARTIAL, missing slots reported per column |
+| `messy_format.xlsx` | commas instead of newlines, `1)` style, extra spaces, NBSP → parses identically to `perfect` |
+| `unnumbered.xlsx` | values with no numbering at all → positional fallback |
+| `overflow.xlsx` | 8 agencies (beyond the 6 scaffold slots) → N=8, no truncation |
+| `bad_dates.xlsx` | broken chain + out-of-window dates → REVIEW with findings |
+| `bad_enums.xlsx` | `Plaza Type = "Private"`, `EQ/Regular = "Yearly"` → INVALID |
+| `bad_phones.xlsx` | 5-digit and 11-digit numbers → INVALID with shape reasons |
+| `identity_edited.xlsx` | a Plaza Name changed → identity mismatch REVIEW |
+| `rows_inserted.xlsx` | 2 rows added at top → still 115/115 matched |
+| `na_marked.xlsx` | `N/A` in several cells → NOT_APPLICABLE |
 
-**Console output — match §23:**
-```
-Excel QC completed.
+**Done when:** all variants assert exact numbers (N, filled, valid, invalid, missing slots) — not just statuses. Coverage of `app/` ≥ 85%.
 
-Sheets checked: 5
-Cells checked: 214
+### Phase K — hardening
 
-Expected responses: 1,250
-Valid responses: 1,073
-Missing responses: 142
-Invalid responses: 35
-
-Complete cells: 142
-Partial cells: 51
-Missing cells: 21
-Review cells: 8
-
-Overall completeness: 85.84%
-
-Report:
-output/QC_Report.xlsx
-```
-
-**Exit codes:** `0` success · `1` strict-mode failures · `2` bad input (file missing, not a workbook, password-protected).
-
-Handle up front: file not found, `.xls` (tell the user to convert to `.xlsx`), password-protected workbook, template and response being the same file.
-
-### Done when
-- [ ] The command above runs end to end on synthetic data
-- [ ] `--dump-schema` produces readable JSON
-- [ ] Bad input produces a clear message and exit code 2, not a traceback
+Performance on 115 rows × 19 columns (trivial, but measure). Unicode names. 30k-character cells. Corrupt files. Determinism. **Security audit:** no `requests`/`httpx`/`urllib` imported anywhere in `app/` (assert in a test); no cell values in logs; no writes outside `--output`. Write `README.md`.
 
 ---
 
-## 16. Phase 13 — Synthetic test data + automated tests
-
-### Goal
-Prove the engine against §21's twelve cases before anything clever is added.
-
-### `tests/make_synthetic.py`
-
-A script that generates workbooks into `sample_data/`. It must produce a template and a matching family of responses:
-
-```powershell
-python tests/make_synthetic.py
-```
-
-**Template sheets to generate:**
-1. `Contact Details` — "Provide 10 contact numbers" (explicit count), "Names of affected persons — provide details for 10 persons"
-2. `Financials` — "Compensation Amounts — provide 5 amounts" (`₹#,##0` number format)
-3. `Project` — `Project Name` (single value), `Date of Award` (single date)
-4. `Structure` — a `Person 1 … Person 10` enumerated block
-5. `Misc` — `Details` with no quantity signal at all (the REVIEW case)
-
-**Response variants (one workbook each):**
-
-| File | Scenario | Expected result |
-|---|---|---|
-| `response_complete.xlsx` | 10 valid phones | COMPLETE, 100% |
-| `response_partial.xlsx` | 6 valid phones | PARTIAL, 60% |
-| `response_missing.xlsx` | phone cell blank | MISSING, 0% |
-| `response_mixed.xlsx` | 5 valid + 2 invalid phones | PARTIAL, E=10 V=5 I=2 M=5, 50% |
-| `response_amounts.xlsx` | 5 valid amounts incl. `₹2,50,000` | COMPLETE, 100%, and `₹2,50,000` is ONE value |
-| `response_names.xlsx` | 3 of 5 names | PARTIAL, 60% |
-| `response_single.xlsx` | project name filled | COMPLETE |
-| `response_review.xlsx` | `Details` filled, count unknown | REVIEW |
-| `response_commas.xlsx` | comma-separated phones | parsed correctly |
-| `response_newlines.xlsx` | newline-separated phones | parsed correctly |
-| `response_numbered.xlsx` | `1. 9876543210` style | numbering stripped |
-| `response_indian_amounts.xlsx` | `₹2,50,000` alone in a cell | detected_count == 1 |
-
-### `tests/test_end_to_end.py`
-For each variant: run `run_qc()` and assert the exact `QCResult` numbers — `E`, `D`, `V`, `I`, `M`, `completeness`, `status`. Not just the status; the counts are where bugs hide.
-
-### Also test
-- `test_no_hardcoded_fields.py` — grep `app/` for the literal strings `"Name"`, `"Phone"`, `"Email"`, `"Amount"` used as *field identifiers* rather than as type keywords. Any hit outside `TYPE_REGISTRY` keyword lists fails the test. This enforces §2 mechanically.
-- `test_no_value_logging.py` — grep `app/` for `logger.*(f"` calls that interpolate a variable named `text`, `raw`, `value`, or `cell.text` without `redact(`. Enforces §25.
-- `test_registry_complete.py` — every `FieldType` member has a `TypeProfile`.
-
-### Done when
-- [ ] `pytest` — all green
-- [ ] All 12 §21 scenarios asserted
-- [ ] Coverage of `app/` ≥ 80% (`pip install pytest-cov`; `pytest --cov=app`)
-
----
-
-## 17. Phase 14 — Hardening
-
-Only after Phase 13 is green.
-
-- [ ] **Performance** — generate a 20-sheet × 5,000-row workbook; the run must finish in reasonable time. Profile if it doesn't. Use `read_only=True` where feasible; cache compiled regexes at module level.
-- [ ] **Robustness** — corrupt file, `.xlsm` with macros, workbook with 1 sheet, sheet with 0 rows, cell with 30,000 characters, non-Latin text (Telugu/Hindi names must validate as NAME — widen the NAME regex to Unicode letter classes `\p{L}` via the `regex` module or `re.UNICODE`).
-- [ ] **Determinism** — the same inputs produce a byte-identical report except the timestamp. Add a `--freeze-time` test hook.
-- [ ] **Security audit** — re-read §25 and verify: no network imports (`requests`, `httpx`, `urllib`) anywhere in `app/`; add a test that asserts this. No file writes outside `--output`. Log files contain zero cell values.
-- [ ] **README.md** — install, run, config reference, status-model explanation, and an explicit "what REVIEW means and what to do about it" section for the human reviewer.
-
-### Milestone 1 gate — do not proceed past here until all of these are true
-- [ ] All 12 synthetic scenarios pass with exact counts
-- [ ] One cell → one field → many expected values → many actual values → counts + validation → status, working end to end
-- [ ] Single-value cells work
-- [ ] Unknown expected counts return REVIEW and never a guessed number
-- [ ] `₹2,50,000` stays one value; `10/08/2026` stays one value
-- [ ] `QC_Report.xlsx` generated with all four sheets
-- [ ] Zero AI, zero network, zero external services
-- [ ] `pytest` green
-
----
-
-## 18. Phase 15 — Local semantic layer (only after Milestone 1)
-
-### Goal
-Rescue the `REVIEW` cases the deterministic layer genuinely cannot resolve — **nothing else**.
-
-### `app/semantic_analyzer.py`
-
-Until this phase, ship a stub:
-```python
-def suggest_field_type(label, context, cfg) -> tuple[FieldType, float] | None:
-    return None   # deterministic engine only
-def labels_match(a: str, b: str, cfg) -> float | None:
-    return None
-```
-
-**When implemented, it may be called only when:**
-1. `cfg.ai.enabled` is true, **and**
-2. the deterministic result was `UNKNOWN` type or `UNKNOWN` count, **and**
-3. the deterministic confidence is below `cfg.ai.min_confidence_to_use`
-
-**Model:** `BAAI/bge-small-en-v1.5` via `sentence-transformers`, loaded from a **local** model directory. Set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` so the library cannot phone home. Download the model once, deliberately, on a machine where that is acceptable, then vendor it into `models/`.
-
-**Use it for:**
-- Label ↔ type matching via cosine similarity against a set of type description sentences
-- Label ↔ label matching in `field_matcher` strategy 4 (is "Contact No." the same field as "Phone Number"?)
-
-**Never use it for:** inventing an expected count. §17's "must NOT guess" applies to the model too — semantic evidence for a *count* caps at confidence 0.6 and stays below the accept threshold unless a human raises it.
-
-**Hard requirement:** with `ai.enabled: false`, the entire test suite must still pass and the code must not import `torch` or `sentence_transformers` at module load. Import lazily inside the function.
-
-### Done when
-- [ ] Test suite green with AI off **and** with AI on
-- [ ] No network call is possible (verify with a network-blocked run)
-- [ ] Every semantically-resolved field is flagged in the report (`Confidence` column + a `source=semantic` note) so a human knows the machine guessed
-
----
-
-## 19. Phase 16+ — Backend and frontend (much later)
-
-Not before Phase 15 is stable.
-
-**FastAPI** (`api/`): `POST /qc` accepting two file uploads, returning the JSON `QCRun` plus a download link for the xlsx. Process in a temp dir, delete files after the response. No persistence of client data without an explicit decision.
-**React**: upload two files, render the dashboard from the JSON, download the report. **Zero business logic in the frontend** (§24) — it renders what the engine returns and nothing more.
-Then, if actually needed: auth, Docker, database.
-
----
-
-## 20. Build order at a glance
+## 8. Build order
 
 ```
-Phase 0   config + logging          ──┐
-Phase 1   excel_reader                │  foundation
-Phase 2   models + TYPE_REGISTRY    ──┘
-Phase 3   value_splitter            ──┐
-Phase 4   validators                  │  the deterministic core —
-Phase 5   field_type_detector         │  most of the real difficulty is here
-Phase 6   expected_count_detector   ──┘
-Phase 7   template_analyzer         ──┐
-Phase 8   field_matcher               │  wiring
-Phase 9   response_parser            │
-Phase 10  qc_engine                 ──┘
-Phase 11  report_generator          ──┐
-Phase 12  main.py CLI                 │  output
-Phase 13  synthetic data + tests      │
-Phase 14  hardening                 ──┘  ◄── MILESTONE 1
-Phase 15  semantic_analyzer              (only after M1)
-Phase 16  FastAPI
-Phase 17  React
+A  template_spec        ← foundation, everything reads it
+B  models
+C  slot_parser          ← highest risk; tests first
+D  validators
+E  row_matcher
+F  response_parser + consistency_checker
+G  qc_engine
+H  report_generator
+I  main.py CLI
+J  synthetic responses + full suite
+K  hardening            ◄── MILESTONE 1
 ```
 
-Phases 3–6 are independently testable with plain strings — no Excel needed. Build and test them in isolation before touching workbooks; that keeps the hardest logic out of the slowest feedback loop.
+Phases C and D are pure string-in/verdict-out — build and test them with no Excel involved.
+
+**After Milestone 1**, and only then: FastAPI wrapper, React dashboard (zero business logic in the frontend), Docker. A local semantic model remains **out of scope** — with a fixed template and a declarative column map there is nothing left for it to disambiguate.
 
 ---
 
-## 21. Progress tracker
+## 9. Progress tracker
 
-**Setup**
-- [x] 1.1 venv created
-- [x] 1.2 requirements installed
-- [x] 1.3 .gitignore
-- [x] 2. directory skeleton
+**Carried over from v1 (still valid)**
+- [x] venv, requirements, .gitignore, directory skeleton
+- [x] `config.py` + `config/default.yaml`
+- [x] `logging_utils.py` (redaction-safe)
+- [x] `excel_reader.py` (+10 tests)
 
-**Deterministic core**
-- [x] Phase 0 — config.py + logging_utils.py
-- [x] Phase 1 — excel_reader.py
-- [x] Phase 2 — models.py + TYPE_REGISTRY
-- [x] Phase 3 — value_splitter.py + tests
-- [x] Phase 4 — validators.py + tests
-- [x] Phase 5 — field_type_detector.py + tests
-- [x] Phase 6 — expected_count_detector.py + tests
-
-**Wiring**
-- [ ] Phase 7 — template_analyzer.py
-- [ ] Phase 8 — field_matcher.py
-- [ ] Phase 9 — response_parser.py
-- [ ] Phase 10 — qc_engine.py + status table tests
-
-**Output**
-- [ ] Phase 11 — report_generator.py
-- [ ] Phase 12 — main.py CLI
-- [ ] Phase 13 — make_synthetic.py + all 12 scenarios
-- [ ] Phase 14 — hardening + README
-- [ ] **MILESTONE 1 reached**
+**v2 build**
+- [ ] Phase A — `template_spec.py` + header-verification tripwire test
+- [ ] Phase B — `models.py` rewrite
+- [ ] Phase C — `slot_parser.py` + tests
+- [ ] Phase D — `validators.py` rewrite + tests
+- [ ] Phase E — `row_matcher.py` + tests
+- [ ] Phase F — `response_parser.py` + `consistency_checker.py` + tests
+- [ ] Phase G — `qc_engine.py` + tests
+- [ ] Phase H — `report_generator.py` + tests
+- [ ] Phase I — `main.py` CLI
+- [ ] Phase J — synthetic responses + full suite
+- [ ] Phase K — hardening + README
+- [ ] **MILESTONE 1**
 
 **Later**
-- [ ] Phase 15 — semantic_analyzer.py
-- [ ] Phase 16 — FastAPI
-- [ ] Phase 17 — React
+- [ ] FastAPI · [ ] React dashboard · [ ] Docker
 
 ---
 
-## 22. Open questions to resolve during the build
+## 10. Open questions
 
-These need a real answer before the phase that depends on them. Don't guess — ask.
+Answer before the phase that depends on each. Don't guess.
 
-1. **Phase 6** — Do real templates state counts in prose ("provide 10 contact numbers"), or is the count implied by pre-numbered rows? This determines which detection strategy gets the most tuning. *Resolve with one real (or realistic) template before Phase 6.*
-2. **Phase 10** — When a client supplies **more** than expected (12 phones where 10 were asked), is that COMPLETE or REVIEW? Default is COMPLETE; flip `status.oversupply_is_review` if the business wants it flagged.
-3. **Phase 9** — Are duplicate values a QC failure? Default says yes (invalid). Confirm.
-4. **Phase 6** — With no quantity signal at all, assume 1 or return REVIEW? Default is REVIEW (safer, but noisier). If real templates are mostly single-value fields, flipping `assume_single_when_unknown` to `true` cuts review noise a lot.
-5. **Phase 4** — Phone rules: India-only 10-digit, or must landlines/STD codes/international numbers validate too?
-6. **Phase 7** — Are client responses always filled *in place* in the same template file? If they sometimes restructure it, Phase 8's label matching becomes load-bearing and deserves more work.
+1. **Phase F — "add details below the provided fields" (Instructions note).** Does a client with 8 agencies add slots `7.` and `8.` *inside the same cell*, or *insert a new row* for the plaza? The plan currently assumes in-cell (slots grow past 6) and `row_matcher` tolerates inserted rows, so both are survivable — but if inserted rows are the norm, row-level aggregation needs to merge them per plaza. **This is the highest-impact unknown.**
+2. **Phase D — Plaza Type vocabulary.** Is `Public Funded / BOT / TOT / InvIT / MLFF` exhaustive, or are `HAM`, `EPC`, `BOT-Annuity` also valid? A wrong list turns valid answers into INVALID.
+3. **Phase D — Contact number.** Strictly 10-digit Indian mobile, or should landlines with STD codes pass?
+4. **Phase G — severity of a broken date chain.** REVIEW (current assumption) or INVALID? It's a real data-quality defect but not a formatting error.
+5. **Phase E — blank/`-` Plaza Codes** (rows 25, 96, 104, 105). Will these be filled in the response, or stay as-is? Currently they're simply not used as keys.
+6. **Phase G — is `Remarks` (S) ever required?** Currently optional and never counted as MISSING.
