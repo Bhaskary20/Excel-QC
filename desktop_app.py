@@ -15,7 +15,6 @@ from __future__ import annotations
 import queue
 import tempfile
 import threading
-import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Optional
@@ -46,12 +45,6 @@ TEXT_SECONDARY = "#8b96a5"
 STATUS_PARTIAL = "#f59e0b"
 STATUS_NORESPONSE = "#ef4444"
 STATUS_FULL = "#10b981"
-
-_STATUS_COLORS = {
-    "Full Response": STATUS_FULL,
-    "Partial Response": STATUS_PARTIAL,
-    "No Response": STATUS_NORESPONSE,
-}
 
 ctk.set_appearance_mode("dark")
 

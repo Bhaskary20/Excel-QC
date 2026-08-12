@@ -7,6 +7,11 @@ output/
 .coverage
 htmlcov/
 
+# PyInstaller build artifacts (e.g. `pyinstaller desktop_app.py`) -- large
+# generated binaries, never meant for source control.
+build/
+dist/
+
 # This project exists to process confidential client data, so every Excel
 # workbook anywhere in the repo is presumed sensitive and ignored by
 # default. The only file ever meant to be committed is the blank template.
