@@ -23,6 +23,9 @@ it processes contain real client data for an active fraud investigation.
 - `.streamlit/config.toml` already binds the local server to `localhost`
   only and disables Streamlit's telemetry, so nothing is reachable from
   another machine on your network and no usage data is phoned home.
+- `desktop_app.py` has no server or network exposure at all -- it's a
+  native window with direct file-system access, arguably the safer of the
+  two GUIs if that matters to your deployment.
 - Never commit a real response `.xlsx` file. `.gitignore` already blocks
   every `.xlsx`/`.xls` in the repo except the blank template
   (`template/Format.xlsx`) -- keep it that way.
@@ -47,15 +50,26 @@ pip install -r requirements.txt
 
 ## Running it
 
-### GUI (recommended)
+### Desktop app
+
+```bash
+python desktop_app.py
+```
+
+A native window (CustomTkinter, no browser involved). Select a response
+`.xlsx`, click **Run QC**, review the Status table, then **Download Full
+Report** to save `QC_Report.xlsx` wherever you like via the native save
+dialog.
+
+### Browser GUI
 
 ```bash
 streamlit run streamlit_app.py
 ```
 
-Opens in your browser at `http://localhost:8501`. Upload a response
-workbook, click **Run QC**, review the Status table, and download the full
-report.
+Opens in your browser at `http://localhost:8501`. Same flow as the desktop
+app -- upload a response workbook, click **Run QC**, review the Status
+table, and download the full report.
 
 ### Command line
 
@@ -84,6 +98,7 @@ config/default.yaml  tunable rules (phone/date formats, NA tokens, etc.)
 template/Format.xlsx the fixed, blank NHAI template (the only .xlsx committed)
 tests/                pytest suite
 main.py               CLI entry point
-streamlit_app.py      GUI entry point
+streamlit_app.py      browser GUI entry point
+desktop_app.py         desktop GUI entry point (CustomTkinter)
 output/                generated reports land here (gitignored)
 ```
