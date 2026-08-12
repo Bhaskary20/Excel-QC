@@ -1,0 +1,9 @@
+# This project processes confidential client data -- everything must stay
+# local. Usage-stats collection is disabled so no telemetry is ever sent,
+# and the server only binds to localhost (not the LAN/external interface)
+# so the app can't be reached from another machine on the network.
+[browser]
+gatherUsageStats = false
+
+[server]
+address = "localhost"

@@ -127,13 +127,13 @@ Per-slot, per-column, actionable.
 | F | COMPOSITE_LOCATION | Free text; **warn** if fewer than 4 comma/plus-separated components (village + chainage + city + pincode), or if no 6-digit pincode is present | empty, or still scaffold |
 | G | ENUM | One of `Public Funded`, `BOT`, `TOT`, `InvIT`, `MLFF` (case/spacing-insensitive; accept `Invit`/`INVIT`) | anything else → INVALID, near-miss → REVIEW |
 | H | TEXT | ≥3 chars, contains a letter | the literal word `Agency` → **scaffold, not data** |
-| I | ENUM | Matches `EQ` or `Regular` (accept `EQ (3 months)`, `3 months`, `Regular (1 Year)`, `1 year`) | anything else |
-| J | DATE_RANGE | Two dates, `DD/MM/YYYY - DD/MM/YYYY`. Accept `to`/`–`/`—` as separators. Both dates must parse, `start <= end`, and both should fall within `01/01/2021 – 14/01/2026` | `From (dd/mm/yyyy ) - To (dd/mm/yyyy)` → scaffold; single date → INVALID; out-of-window → REVIEW |
-| K, O | NAME | 2–80 chars, letters/space/`.`/`'`/`-`, Unicode-aware (Indian-script names must pass) | pure digits, punctuation only |
+| I | ENUM | Matches `EQ` or `Regular` (accept `EQ (3 months)`, `3 months`, `Regular (1 Year)`, `1 year`, and the misspellings `Reguler`/`Reguar` seen repeatedly in real data) | anything else |
+| J | DATE_RANGE | Two dates, `DD/MM/YYYY - DD/MM/YYYY` **or** `DD.MM.YYYY - DD.MM.YYYY` (dot-formatted dates are common in real responses and must not be misread as list markers — see §4). Accept `to`/`–`/`—` as separators. Both dates must parse, `start <= end`, and both should fall within `01/01/2021 – 14/01/2026` | `From (dd/mm/yyyy ) - To (dd/mm/yyyy)` → scaffold; single date → INVALID; out-of-window → REVIEW |
+| K, O | NAME | 2–80 chars, letters/space/`.`/`'`/`-`/`&`/`/`, Unicode-aware (Indian-script names must pass). A trailing role tag (`(RE)`/`(TL)`/`(ATL)`/`(Team Leader)`), phone number (comma/dash/labeled, e.g. `Mobile: ...`), or tenure date range is stripped and the underlying name validated on its own — PIUs almost always annotate a real name this way | pure digits, punctuation only; text that's still not name-shaped once annotation is stripped |
 | L | PHONE | 10 digits after stripping `+91`/`0091`/`0`/spaces/`-`/`()`; must start `6-9` | wrong length, non-digits, landline formats → INVALID with a shape reason |
 | M | ADDRESS | ≥10 chars, contains a letter | too short |
 | N, P | TEXT | ≥3 chars, contains a letter | — |
-| Q, R | NUMBER | Positive integer after stripping `,` and units (`veh`, `PCU`, `/day`) | non-numeric, negative |
+| Q, R | NUMBER | Positive integer after stripping `,`, units (`veh`, `PCU`, `/day`), a fiscal-year label (`FY 2020-21 - 1240`), or a trailing parenthetical remark (`4824 (Till Date 27/07/2026)`). **R only** also accepts `0` (a plaza can genuinely have zero exempted-vehicle traffic; Q cannot have zero average daily traffic and still be operating) | non-numeric, negative, ambiguous (more than one leftover number after stripping known noise) |
 | S | TEXT (optional) | Any non-empty | never MISSING — optional |
 
 **Cross-slot rules (per row):**
@@ -158,6 +158,7 @@ The client will not respect the scaffold's formatting. The parser must absorb al
 | `9876543210 / 9876543211` | two values (slash separator, PHONE only) |
 | `₹2,50,000` in a NUMBER column | one value — never split on digit-internal commas |
 | `10/08/2026` in a DATE column | one value — never split on `/` |
+| `1. From 30.01.2023 - To 23.06.2023` (dot-formatted date, no space between the marker's delimiter and the date) | slot 1 = the whole date range — the day-of-month (`30.`) is never misread as its own marker, since only a marker followed by whitespace is trusted unconditionally; a zero-space delimiter immediately followed by more date-shaped digits is rejected as a marker |
 | non-breaking spaces, zero-width chars, `\r\n`, trailing whitespace | normalized away before parsing |
 | `N/A`, `NA`, `Nil`, `-`, `Not Applicable` | NOT_APPLICABLE, not a value |
 
@@ -407,6 +408,7 @@ Phases C and D are pure string-in/verdict-out — build and test them with no Ex
 - [x] Phase G — `qc_engine.py` + tests
 - [x] Phase H — `report_generator.py` + tests
 - [x] Phase I — `main.py` CLI
+- [x] Real-data audit pass (11.08.2026): cross-checked the engine cell-by-cell against the real `UPSTF Case 11.08.2026.xlsx` and row-by-row against the ground-truth PIU tracker; fixed 5 parsing/validation gaps (dot-formatted dates being shredded into bogus slots, fiscal-year-labelled/annotated traffic numbers, EQ/Regular typo aliases, NAME columns rejecting real names over an appended role tag/phone/date, R accepting 0). See §3–§4 for the updated rules. Overall completeness on the real file: 67.19% → 72.24%; invalid-slot count 580 → 128. Remaining invalid slots were individually inspected and are genuinely malformed/ambiguous source data, not further bugs.
 - [ ] Phase J — synthetic responses + full suite
 - [ ] Phase K — hardening + README
 - [ ] **MILESTONE 1**
@@ -426,3 +428,5 @@ Answer before the phase that depends on each. Don't guess.
 4. **Phase G — severity of a broken date chain.** REVIEW (current assumption) or INVALID? It's a real data-quality defect but not a formatting error.
 5. **Phase E — blank/`-` Plaza Codes** (rows 25, 96, 104, 105). Will these be filled in the response, or stay as-is? Currently they're simply not used as keys.
 6. **Phase G — is `Remarks` (S) ever required?** Currently optional and never counted as MISSING.
+7. ~~**Phase D — column R zero-value handling.**~~ **RESOLVED (11.08.2026):** R (exempted-vehicle count) now accepts a literal `0` as valid — a genuinely operating plaza can have zero exempted-vehicle traffic on record. Q (average daily traffic) still rejects `0`, since an operating plaza can't have zero average traffic.
+8. ~~**Phase D — NAME (K, O) tolerance for real-world annotations.**~~ **RESOLVED by real data (11.08.2026):** PIUs overwhelmingly append a role tag (`(RE)`/`(TL)`/`(ATL)`/`(Team Leader)`), a contact detail, or a tenure date range to a real name rather than sending a bare one — 164 of 281 remaining invalid slots at the time were this pattern. The validator now strips the annotation and validates the underlying name, rather than flagging every annotated-but-real name as INVALID. Known accepted gap: if the *entire* value is a parenthetical explanation with only a short non-name fragment outside it (e.g. `"MoRTH (Only Toll collection...)"`), that fragment can slip through looking like a short but valid name.
