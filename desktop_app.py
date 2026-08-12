@@ -13,6 +13,7 @@ produced -- no network calls, no telemetry, nothing leaves this machine.
 from __future__ import annotations
 
 import queue
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -31,7 +32,15 @@ from app.template_spec import SHEET_NAME
 
 import openpyxl
 
-TEMPLATE_PATH = str(Path(__file__).resolve().parent / "template" / "Format.xlsx")
+# Running from source, this file's parent is the repo root. Inside a
+# PyInstaller onefile bundle there is no source tree -- data files listed
+# in the .spec's `datas` are extracted to sys._MEIPASS at startup instead.
+if getattr(sys, "frozen", False):
+    _BASE_DIR = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+else:
+    _BASE_DIR = Path(__file__).resolve().parent
+
+TEMPLATE_PATH = str(_BASE_DIR / "template" / "Format.xlsx")
 
 # ---- palette ---------------------------------------------------------------
 BG = "#0d1117"

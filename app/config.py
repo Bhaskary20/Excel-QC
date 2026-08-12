@@ -8,13 +8,22 @@ frozen, attribute-accessible Config object.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "default.yaml"
+# Running from source, app/config.py's parent.parent is the repo root. Inside
+# a PyInstaller onefile bundle there is no "repo root" -- data files listed
+# in the .spec's `datas` are extracted to sys._MEIPASS at startup instead.
+if getattr(sys, "frozen", False):
+    _BASE_DIR = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+else:
+    _BASE_DIR = Path(__file__).resolve().parent.parent
+
+DEFAULT_CONFIG_PATH = _BASE_DIR / "config" / "default.yaml"
 
 
 class _Frozen(BaseModel):

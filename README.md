@@ -81,6 +81,29 @@ Run `python main.py --help` for the full list of flags (`--strict`,
 `--dump-json`, `--config`, etc.). `--template` defaults to the committed
 `template/Format.xlsx` and normally never needs to be passed.
 
+## Building a standalone .exe (for handing to someone without Python)
+
+```bash
+pip install pyinstaller
+pyinstaller desktop_app.spec
+```
+
+Produces `dist/Toll Plaza Response QC.exe` -- a single self-contained
+Windows executable (~35MB) bundling the template, config, and CustomTkinter
+assets, so nothing needs to be installed on the machine it runs on. No
+console window, no network access, no installed Python required.
+
+`desktop_app.spec` already lists the two data files the app reads by
+relative path at runtime (`template/Format.xlsx`, `config/default.yaml`)
+plus CustomTkinter's own theme files, which PyInstaller's static analysis
+can't discover on its own since nothing imports them by name -- if you add
+another bundled resource later, add it to the spec's `datas` the same way.
+
+The `.exe` itself is not committed (`build/`/`dist/` are gitignored, and a
+binary that size doesn't belong in git regardless) -- hand it to whoever
+needs it directly (internal file share, direct transfer), the same way
+you'd handle any file containing this project's context.
+
 ## Running the tests
 
 ```bash
