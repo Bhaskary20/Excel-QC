@@ -75,12 +75,14 @@ def test_parse_cell_na_token_on_optional_column_is_na(cfg):
     assert result.slot_values == []
 
 
-def test_parse_cell_mixed_valid_invalid(cfg):
+def test_parse_cell_multiple_slots_all_valid(cfg):
+    # L is presence-only now (content is never checked, only whether a slot
+    # has something in it) -- three distinct slots means three SlotValues,
+    # all valid regardless of shape.
     cell = _cell(15, 12, "9876543210\n9876\n9876543212")
     result = parse_cell(cell, "L", cfg)
     assert len(result.slot_values) == 3
-    valid = [sv for sv in result.slot_values if sv.verdict.is_valid]
-    assert len(valid) == 2
+    assert all(sv.verdict.is_valid for sv in result.slot_values)
 
 
 def test_parse_cell_non_slotted_single_value(cfg):

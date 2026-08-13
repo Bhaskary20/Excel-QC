@@ -20,7 +20,6 @@ that could drift out of sync.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
 from enum import Enum
 from typing import Optional
 
@@ -32,8 +31,6 @@ TOTAL_DATA_ROWS = LAST_DATA_ROW - FIRST_DATA_ROW + 1  # 115
 
 SCAFFOLD_SLOTS = 6  # soft cap -- the Instructions sheet permits more
 ANCHOR_COLUMN = "H"  # column that determines N (agency count) for a row
-
-CONTRACT_WINDOW = (date(2021, 1, 1), date(2026, 1, 14))
 
 
 class Role(str, Enum):
@@ -61,14 +58,12 @@ class ColumnSpec:
     role: Role
     value_type: ValueType
     slotted: bool  # True for H..R: cell holds up to N numbered sub-values
-    required: bool  # False only for S (Remarks); irrelevant for KEY columns
+    required: bool  # False for F (Village) and S (Remarks); irrelevant for KEY columns
     match_key: bool = False  # usable by row_matcher to identify a row (A, C)
     scaffold_raw: Optional[str] = None  # verbatim pre-filled text, slotted columns only
     composite_components: tuple[str, ...] = ()  # F only
-    enum_values: tuple[str, ...] = ()  # G, I only
-    # canonical enum value -> alternate phrasings that should still match it,
-    # e.g. I's "3 months" alone (no "EQ" prefix) -> "EQ (3 months)". Only I
-    # needs this; G's values are already distinct standalone words.
+    enum_values: tuple[str, ...] = ()  # G only
+    # canonical enum value -> alternate phrasings that should still match it.
     enum_aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # R only: a plaza can genuinely have zero exempted-vehicle traffic on
     # record, unlike Q where zero average daily traffic is implausible for
@@ -108,7 +103,7 @@ COLUMNS: dict[str, ColumnSpec] = {
     "F": ColumnSpec(
         letter="F", index=6, header="Plaza - Village, Location",
         role=Role.INPUT, value_type=ValueType.COMPOSITE_LOCATION,
-        slotted=False, required=True,
+        slotted=False, required=False,
         composite_components=("village_name", "chainage", "city_name", "pincode"),
     ),
     "G": ColumnSpec(
@@ -130,17 +125,16 @@ COLUMNS: dict[str, ColumnSpec] = {
     ),
     "I": ColumnSpec(
         letter="I", index=9, header="EQ (3 months)/ Regular (1 year)",
-        role=Role.INPUT, value_type=ValueType.ENUM,
+        # One of the 8 quantity-only columns -- at the user's request, its
+        # content is no longer checked against the EQ/Regular vocabulary
+        # (real data sometimes has a contract-model term like "OMT"/"TOT"
+        # here instead, which isn't a typo, just not what this column
+        # asks for -- only whether a slot was filled in still matters).
+        # TEXT rather than ENUM specifically so this doesn't also loosen
+        # G (Plaza Type), which shares ENUM and still validates content.
+        role=Role.INPUT, value_type=ValueType.TEXT,
         slotted=True, required=True,
         scaffold_raw=_SCAFFOLD_BLANK,
-        enum_values=("EQ (3 months)", "Regular (1 year)"),
-        enum_aliases={
-            "EQ (3 months)": ("eq", "3 month", "3months"),
-            # "Reguler"/"Reguar" are the two misspellings of "Regular" seen
-            # repeatedly in real client data (THIRPALIBADI, AKHEPURA x4,
-            # Kadaligarh) -- common enough to trust rather than flag INVALID.
-            "Regular (1 year)": ("regular", "reguler", "reguar", "1 year", "1year", "annual"),
-        },
     ),
     "J": ColumnSpec(
         letter="J", index=10, header="Contract Start & End date with extension (01/01/2021 - 14/01/2026)",

@@ -33,18 +33,18 @@ def test_get_validator_resolves_every_type():
         assert callable(get_validator(value_type))
 
 
-def test_registered_validator_accepts_nonempty_rejects_blank():
+def test_registered_validator_accepts_nonempty():
     # Whatever's currently registered for PHONE (placeholder pre-Phase D,
-    # real validator after) must agree on these two unambiguous cases.
+    # real validator after) must agree on this unambiguous case. Blank/NA
+    # handling happens upstream in slot_parser.py before a value ever
+    # reaches a validator, so a validator is never actually called with a
+    # blank string in the real pipeline -- not tested here.
     cfg = load_config()
     validator = get_validator(ValueType.PHONE)
     spec = get_column("L")  # Contact of Toll Manager -- the real PHONE column
 
     ok = validator("9876543210", cfg, spec)
     assert ok.is_valid is True
-
-    blank = validator("   ", cfg, spec)
-    assert blank.is_valid is False
 
 
 def test_status_members_match_spec():

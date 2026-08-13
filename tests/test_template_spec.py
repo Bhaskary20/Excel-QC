@@ -20,6 +20,7 @@ from app.template_spec import (
     SHEET_NAME,
     TOTAL_DATA_ROWS,
     Role,
+    ValueType,
     key_columns,
     match_key_columns,
     slotted_columns,
@@ -116,9 +117,12 @@ def test_plaza_code_is_key_but_not_a_match_key():
     assert COLUMNS["B"].match_key is False
 
 
-def test_only_remarks_is_optional():
+def test_village_and_remarks_are_optional():
+    # F (Plaza Village/Location) was made optional at the user's request --
+    # it's okay for a plaza to have no village data. S (Remarks) was
+    # already the one genuinely optional field.
     optional = {c.letter for c in COLUMNS.values() if not c.required}
-    assert optional == {"S"}
+    assert optional == {"F", "S"}
 
 
 def test_scaffold_slots_constant_matches_h_scaffold():
@@ -133,6 +137,10 @@ def test_composite_location_has_four_components():
     assert COLUMNS["F"].composite_components == ("village_name", "chainage", "city_name", "pincode")
 
 
-def test_enum_columns_have_values():
+def test_enum_column_has_values():
+    # G is the only ENUM column left -- I moved to TEXT (presence only) at
+    # the user's request, since real data sometimes has a contract-model
+    # term there instead of EQ/Regular, and only slot count should matter.
     assert COLUMNS["G"].enum_values == ("Public Funded", "BOT", "TOT", "Invit", "MLFF")
-    assert COLUMNS["I"].enum_values == ("EQ (3 months)", "Regular (1 year)")
+    assert COLUMNS["I"].value_type == ValueType.TEXT
+    assert COLUMNS["I"].enum_values == ()

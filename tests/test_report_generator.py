@@ -54,6 +54,7 @@ def _sample_run() -> QCRun:
     ]
     per_column_partial = {
         "H": _cell_result("H", "Agency name", ValueType.TEXT, None, 4, 4, 0, [], Status.COMPLETE),
+        "K": _cell_result("K", "Name of Toll Plaza Manager", ValueType.NAME, 4, 4, 4, 0, [], Status.COMPLETE),
         "L": _cell_result(
             "L", "Contact of Toll Manager", ValueType.PHONE, 4, 2, 1, 1, [3, 4], Status.PARTIAL,
             completeness=0.25, slot_values=l_values,
@@ -172,11 +173,12 @@ def test_status_sheet_full_response_for_a_fully_complete_row(cfg, tmp_path):
 def test_status_sheet_partial_response_and_field_group_remark(cfg, tmp_path):
     output = _generate(_sample_run(), cfg, tmp_path)
     ws = openpyxl.load_workbook(output)["Status"]
-    # SEHATGANJ (row 2): H complete, L partial -- Partial Response, and the
-    # remark names the K+L group ("Name & Contact details of Toll Manager"),
-    # not the raw column letter "L".
+    # SEHATGANJ (row 2): H and K complete, L partial -- Partial Response, and
+    # the remark names only "Contact details of Toll Manager" (L), not K --
+    # K and L are graded and reported independently, not as one combined
+    # "Name & Contact..." label that would misname K as a problem too.
     assert ws.cell(row=2, column=4).value == "Partial Response"
-    assert ws.cell(row=2, column=5).value == "Name & Contact details of Toll Manager"
+    assert ws.cell(row=2, column=5).value == "Contact details of Toll Manager"
 
 
 def test_status_sheet_no_response_when_n_contracts_zero(cfg, tmp_path):
@@ -189,25 +191,12 @@ def test_status_sheet_no_response_when_n_contracts_zero(cfg, tmp_path):
 
 def test_status_sheet_slot_count_mismatch_not_double_reported(cfg, tmp_path):
     # SEHATGANJ's one consistency finding is a slot_count_mismatch on L --
-    # that's the same gap the "Name & Contact..." field-group remark already
-    # names, so it must not also appear as its own remarks entry.
+    # that's the same gap the "Contact details of Toll Manager" field-group
+    # remark already names, so it must not also appear as its own remarks entry.
     output = _generate(_sample_run(), cfg, tmp_path)
     ws = openpyxl.load_workbook(output)["Status"]
     remarks = ws.cell(row=2, column=5).value
     assert remarks.count(",") == 0  # exactly one item, no second clause appended
-
-
-def test_status_sheet_consistency_finding_appended_to_remarks(cfg, tmp_path):
-    run = _sample_run()
-    run.rows[1] = dataclasses.replace(
-        run.rows[1],
-        consistency_findings=[
-            ConsistencyFinding(kind="duplicate_phone", column="L", severity=Status.REVIEW, message="same phone x2"),
-        ],
-    )
-    output = _generate(run, cfg, tmp_path)
-    ws = openpyxl.load_workbook(output)["Status"]
-    assert ws.cell(row=3, column=5).value == "same phone number used for multiple agencies"
 
 
 def test_status_sheet_identity_mismatch_appended_to_remarks(cfg, tmp_path):
@@ -218,6 +207,65 @@ def test_status_sheet_identity_mismatch_appended_to_remarks(cfg, tmp_path):
     output = _generate(run, cfg, tmp_path)
     ws = openpyxl.load_workbook(output)["Status"]
     assert "identity mismatch" in ws.cell(row=3, column=5).value
+
+
+def test_status_sheet_aeie_htms_remark_fires_when_group_has_no_data(cfg, tmp_path):
+    # N/O/P are graded as a group (see consistency_checker.aeie_htms_group_status),
+    # not per-column -- when none of the three has any real data, the
+    # "Details of AE/IE, HTMS / Toll expert" remark must still appear, same
+    # as it always has.
+    run = _sample_run()
+    bad_n_o_p = {
+        "N": _cell_result("N", "Supervision Consultant (AE / IE) name and its address", ValueType.NAME, 4, 0, 0, 0, [1, 2, 3, 4], Status.MISSING),
+        "O": _cell_result("O", "Team Leader name (AE/ IE ) during the said Contract Period", ValueType.NAME, 4, 0, 0, 0, [1, 2, 3, 4], Status.MISSING),
+        "P": _cell_result("P", "HTMS / Toll Expert during said contract period", ValueType.TEXT, 4, 0, 0, 0, [1, 2, 3, 4], Status.MISSING),
+    }
+    run.rows[1] = dataclasses.replace(
+        run.rows[1], per_column={**run.rows[1].per_column, **bad_n_o_p}, status=Status.MISSING,
+    )
+    output = _generate(run, cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    assert ws.cell(row=3, column=4).value == "Partial Response"
+    remarks = ws.cell(row=3, column=5).value
+    assert "Details of AE/IE, HTMS / Toll expert" in remarks
+
+
+def test_status_sheet_aeie_htms_remark_absent_when_group_status_is_complete(cfg, tmp_path):
+    # O is only PARTIAL on its own (2 of 4), but N and P each have real data
+    # too, so the AE/IE/HTMS *group* is COMPLETE. The remark must go by the
+    # group verdict, not fire just because one of the three individually
+    # falls short of the agency count.
+    run = _sample_run()
+    n_o_p = {
+        "N": _cell_result("N", "Supervision Consultant (AE / IE) name and its address", ValueType.NAME, 4, 4, 4, 0, [], Status.COMPLETE),
+        "O": _cell_result("O", "Team Leader name (AE/ IE ) during the said Contract Period", ValueType.NAME, 4, 2, 2, 0, [3, 4], Status.PARTIAL),
+        "P": _cell_result("P", "HTMS / Toll Expert during said contract period", ValueType.TEXT, 4, 4, 4, 0, [], Status.COMPLETE),
+    }
+    run.rows[1] = dataclasses.replace(run.rows[1], per_column={**run.rows[1].per_column, **n_o_p})
+    output = _generate(run, cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    remarks = ws.cell(row=3, column=5).value
+    assert remarks is None or "AE/IE" not in remarks
+
+
+def test_status_sheet_aeie_htms_remark_fires_when_neither_is_fully_covered(cfg, tmp_path):
+    # Real case (SEHATGANJ, tests/UPSTF Case 13.08.2026.xlsx): N and O each
+    # have only 2 of 8 agencies covered -- neither is close to complete,
+    # even though it isn't literally zero. Unlike the FULARA case (one of
+    # the two fully covers every agency), "has any data" is too generous a
+    # bar here -- the remark must still name AE/IE, on top of HTMS (P,
+    # whole-cell "NOT ASSIGNED", zero).
+    run = _sample_run()
+    n_o_p = {
+        "N": _cell_result("N", "Supervision Consultant (AE / IE) name and its address", ValueType.NAME, 8, 2, 2, 0, [3, 4, 5, 6, 7, 8], Status.PARTIAL),
+        "O": _cell_result("O", "Team Leader name (AE/ IE ) during the said Contract Period", ValueType.NAME, 8, 2, 2, 0, [3, 4, 5, 6, 7, 8], Status.PARTIAL),
+        "P": _cell_result("P", "HTMS / Toll Expert during said contract period", ValueType.TEXT, 8, 0, 0, 0, list(range(1, 9)), Status.MISSING),
+    }
+    run.rows[1] = dataclasses.replace(run.rows[1], per_column={**run.rows[1].per_column, **n_o_p})
+    output = _generate(run, cfg, tmp_path)
+    ws = openpyxl.load_workbook(output)["Status"]
+    remarks = ws.cell(row=3, column=5).value
+    assert remarks == "Details of AE/IE, HTMS / Toll expert"
 
 
 def test_status_sheet_row_style_reflects_response_label(cfg, tmp_path):

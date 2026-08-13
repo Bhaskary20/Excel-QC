@@ -87,6 +87,7 @@ def test_fully_correct_small_workbook_scores_100_percent(cfg, tmp_path):
 
     run = run_qc(str(template_path), str(response_path), cfg)
 
+
     assert run.workbook_summary.overall_completeness == 1.0
     assert run.workbook_summary.complete_rows == 1
     assert run.workbook_summary.missing_cells == 0

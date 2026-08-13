@@ -106,10 +106,10 @@ class CellResult:
 
 @dataclass(frozen=True)
 class ConsistencyFinding:
-    """A cross-column or cross-slot problem within one row -- e.g. a date
-    chain gap between contract slots, or fewer phone numbers than agencies."""
+    """A cross-slot problem within one row -- currently just a column having
+    fewer valid slots than the row's declared agency count."""
 
-    kind: str  # "slot_count_mismatch" | "date_chain_gap" | "date_window_coverage" | "duplicate_phone" | ...
+    kind: str  # "slot_count_mismatch"
     column: Optional[str]  # letter, if the finding is column-specific
     severity: Status  # REVIEW or INVALID
     message: str
@@ -134,6 +134,11 @@ class RowResult:
     status: Status
     completeness: Optional[float]
     identity_mismatches: list[str] = field(default_factory=list)
+    # Other response-workbook row numbers this row's INPUT columns are
+    # merged-cell-linked to (e.g. two adjoining toll plazas where the PIU
+    # gave one shared answer for agency/contract/manager details, spanning
+    # both rows via an Excel merge). Empty when this row has no such link.
+    merged_with_rows: tuple[int, ...] = ()
 
 
 # ============================================================================

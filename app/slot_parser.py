@@ -59,25 +59,27 @@ _ZERO_WIDTH_PATTERN = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 _MULTI_BLANK_LINES = re.compile(r"\n{3,}")
 
 # Matches a slot marker either at the start of the string/line, or
-# immediately after whitespace/comma/semicolon -- so "1. A, 2. B" on one
-# physical line still finds marker 2 even though re.MULTILINE's ^ alone
-# would only anchor at true line starts.
+# immediately after whitespace/comma/semicolon/a quote mark -- so "1. A,
+# 2. B" on one physical line still finds marker 2 even though
+# re.MULTILINE's ^ alone would only anchor at true line starts, and a
+# numbered entry wrapped in literal quotes ('"1. Ranchor Infra..."', a
+# paste artifact -- found via real client data, Bhojpuri/MUDHIPAR) isn't
+# invisible to the marker just because a stray quote sits in front of it.
 #
-# "1.ABC" (no space after the delimiter) is a legitimate zero-space marker
-# per BUILD_PLAN.md, but a dot-formatted date's day component is shaped
-# identically -- "From 30.01.2023" has "30." sitting right after a space,
-# indistinguishable from a real marker by shape alone. Found via real J
-# (Contract Start & End date) data: dozens of DD.MM.YYYY cells were shredded
-# into bogus slots keyed by day-of-month. The two cases only diverge on
-# what immediately follows a *zero-space* delimiter: real marker content
-# starts with a name/word, a date's next component is more digits. A
-# marker followed by actual whitespace is never ambiguous and is always
-# trusted, regardless of what comes after it.
-_DATE_CONTINUATION = r"\d{1,2}[./]\d{2,4}"
+# This pattern alone can't tell a real marker from an embedded number of
+# the same shape -- "91.65", "46-738", "30.01.2023", "Plot No. - 83. Azad
+# Colony" all look exactly like "<digit(s)><delimiter><content>" whether
+# or not there's a space before the content, and whether or not what
+# follows also happens to look date-shaped ("...5.24.05.2025 to
+# 24.05.2026", BHARBHID -- a perfectly real final marker whose own
+# content, being a date, "looks like" it's continuing a date). That
+# distinction isn't made here at all -- it needs to know where the match
+# sits relative to the surrounding line breaks and the numbers already
+# claimed, which only _filter_implausible_jumps below has visibility into.
 _SLOT_MARKER_PATTERN = re.compile(
-    r"(?:^|(?<=[\s,;]))"
+    r"""(?:^|(?<=[\s,;"']))"""
     r"(?:\((\d{1,2})\)\s*"
-    rf"|(\d{{1,2}})\s*[.\)\-:](?:\s+|(?!{_DATE_CONTINUATION})))",
+    r"|(\d{1,2})\s*[.\)\-:]\s*)",
     re.MULTILINE,
 )
 
@@ -89,6 +91,23 @@ _SLOT_MARKER_PATTERN = re.compile(
 # primary marker source.
 _ORPHANED_LEADING_DIGIT = re.compile(r"^(\d{1,2})\s+(?=\S)")
 _ORPHANED_EMBEDDED_MARKER = re.compile(r"\n\s*(\d{1,2})\s+(?=\S)")
+
+# A marker that HAS its own delimiter ("2.Reguler") but sits right after a
+# stray punctuation character instead of whitespace/comma/semicolon/string
+# start, so _SLOT_MARKER_PATTERN's lookbehind doesn't recognize it (e.g.
+# "...Reguler .2.Reguler", a stray "." glued in front of a legitimate "2."
+# marker -- found via real client data, THIRPALIBADI column I). Comma and
+# semicolon are excluded since those already anchor a primary match.
+# Recovery still relies on the same strict host_slot < candidate <
+# next_claimed bounds as the other orphan patterns for safety, since a
+# short digit-plus-delimiter shape alone (e.g. inside a decimal number)
+# isn't rare enough to trust on its own.
+_ORPHANED_STRAY_CHAR_MARKER = re.compile(r"[^\s\w,;](\d{1,2})[.\)\-:]\s*(?=\S)")
+
+
+def _find_next_orphan_match(text: str) -> Optional[re.Match]:
+    matches = [m for m in (_ORPHANED_EMBEDDED_MARKER.search(text), _ORPHANED_STRAY_CHAR_MARKER.search(text)) if m]
+    return min(matches, key=lambda m: m.start()) if matches else None
 
 _SEPARATOR_PRECEDENCE = ["\n", ";", ",", "/"]
 _ALLOWED_SEPARATORS: dict[ValueType, frozenset[str]] = {
@@ -121,8 +140,14 @@ def _allowed_separators_for(spec: ColumnSpec) -> frozenset[str]:
 
 
 _DIGIT_INTERNAL_COMMA_SPLIT = re.compile(r"(?<!\d),|,(?!\d)")
-_LEADING_QUOTES = re.compile(r"""^['"]+""")
-_TRAILING_QUOTES = re.compile(r"""['"]+$""")
+# Backtick included alongside the straight quotes -- same category of stray
+# edge character (a typo/paste artifact, never legitimate data in any of
+# the 9 value types), found via real client data: a numbered-list marker
+# with no space before the content ("3.`Himanshu") left a leading backtick
+# stuck to an otherwise-valid name, failing NAME validation outright instead
+# of being stripped like a stray quote already is.
+_LEADING_QUOTES = re.compile(r"""^['"`]+""")
+_TRAILING_QUOTES = re.compile(r"""['"`]+$""")
 _TRAILING_SEPARATOR_CHARS = re.compile(r"[,;.]+$")
 _PURE_PUNCTUATION = re.compile(r"^\W+$")
 
@@ -159,8 +184,109 @@ def _clean_slot_value(raw: str) -> str:
     return text.strip()
 
 
-def _numbered_parse(text: str) -> dict[int, str]:
-    matches = list(_SLOT_MARKER_PATTERN.finditer(text))
+# A primary match here is only the markers _SLOT_MARKER_PATTERN itself
+# recognizes -- one with a dropped delimiter ("5 Name" instead of "5.
+# Name") or a stray character glued in front ("...Reguler .2.Reguler")
+# never reaches this list at all; those are recovered separately, later,
+# by _recover_embedded_orphans. So a gap between two primary matches isn't
+# automatically suspicious -- "4." followed by "6." is exactly what a
+# dropped "5." looks like from here, and real client data has even had two
+# such drops back to back (LIMDI: primary matches land on 4 and 7, a gap
+# of 3, with 5 and 6 both recovered afterward). That gap-based tolerance
+# is only safe, though, for a marker that starts a genuinely fresh item --
+# a real PIU always starts each new list item on its own line (or, on
+# rare occasions, right after a comma/semicolon on the same line: "1. A,
+# 2. B"). See _classify_match_position.
+#
+# Two narrower cases get a smaller benefit of the doubt -- an exact
+# next-integer continuation only, never a duplicate and never a bigger
+# skip, since neither position is as unambiguous as a genuinely fresh
+# item:
+#   - Right after "&": real client data uses it as a deliberate "and"
+#     joiner for a same-line extra item ("...to 02.12.2025 (07:59:59
+#     Hrs.) & 7. 02.12.2025...", KALYANPUR/KATOGHAN columns J/L/Q/R) --
+#     but the *same* column also uses "&" to join an extra sub-range onto
+#     an already-numbered slot with no marker of its own ("22.03.2022...
+#     & 02.08.2022...", still inside slot 2), so an "&"-joined number is
+#     only trusted when it's exactly the next integer in the count, not
+#     whenever it merely fits somewhere.
+#   - Right after a single ordinary space with a letter immediately
+#     following the marker: real client data has two people joined on one
+#     line with nothing but a plain space between them ("5. M/s Vikas
+#     Hooda 6.M/s iiskam", NIMBIJODHA column H), exactly as legitimate as
+#     the comma-joined case just missing the comma. What tells that apart
+#     from an embedded number in the same position (BHARBHID: "1.
+#     03.03.2022...", the day-of-month glued onto the marker) is what
+#     comes right after the delimiter: real content starts with a letter,
+#     an embedded number is followed by more digits ("03" continuing into
+#     ".2022", "9-229" continuing into "229").
+# Neither exception applies to the very first match in the whole cell
+# (FULARA: an un-numbered free-text block's embedded dates
+# "25.08.2025"/"26.08.2025" happened to look like a perfectly sequential
+# 25-then-26 with nothing to weigh them against yet).
+_MAX_FRESH_ITEM_GAP = 5
+
+
+def _classify_match_position(text: str, pos: int, end: int) -> str:
+    """Returns "fresh" (generous gap+duplicate tolerance), "sequential"
+    (only an exact next-integer continuation, see the module comment
+    above), or "suspect" (never trusted)."""
+    i = pos - 1
+    space_run = 0
+    while i >= 0 and text[i] in " \t":
+        space_run += 1
+        i -= 1
+    # 2+ consecutive spaces reads the same as a line break -- real client
+    # data pads a dropped-delimiter marker out with a wide run of spaces
+    # instead of a newline (LIMDI: "...6   Narendra" then 16 spaces before
+    # a legitimate "7."), which is nothing like the single ordinary space
+    # that precedes an embedded number.
+    if space_run >= 2:
+        return "fresh"
+    if i < 0 or text[i] in "\n,;\"'":
+        # A quote counts as fresh too -- a numbered entry wrapped in
+        # literal quotes ('"1. Ranchor Infra..."', Bhojpuri/MUDHIPAR)
+        # starts just as fresh an item as a newline would.
+        return "fresh"
+    if text[i] == "&":
+        return "sequential"
+    if end < len(text) and text[end].isalpha():
+        return "sequential"
+    return "suspect"
+
+
+def _filter_implausible_jumps(text: str, matches: list["re.Match[str]"]) -> list["re.Match[str]"]:
+    """_SLOT_MARKER_PATTERN can't itself tell a real marker from an embedded
+    number of the same shape -- a decimal fraction, a house/plot number, a
+    dotted date, all match just as confidently as a genuine "3." or "4."
+    would (real client data: SEHATGANJ's dates, DAULATPURA/MASHORA's
+    traffic figures, SURJAPUR/PANDILLAPALLI/MORATANDI's addresses, FULARA's
+    free text, Manesar/Kherki Daula's dates, KALYANPUR/KATOGHAN's
+    ampersand-joined ranges). See the module comments above
+    _MAX_FRESH_ITEM_GAP and on _classify_match_position for what each of
+    the three position classes is trusted to do. Drop any match that
+    fails its class's check; its text just stays part of whichever slot
+    is still open, as if it had never matched at all.
+    """
+    filtered = []
+    running_max: Optional[int] = None
+    for m in matches:
+        num = int(m.group(1) or m.group(2))
+        position = _classify_match_position(text, m.start(), m.end())
+        if position == "suspect":
+            continue
+        if position == "sequential":
+            if running_max is None or num != running_max + 1:
+                continue
+        elif running_max is not None and (num < running_max or num > running_max + _MAX_FRESH_ITEM_GAP):
+            continue
+        running_max = num if running_max is None else max(running_max, num)
+        filtered.append(m)
+    return filtered
+
+
+def _numbered_parse(text: str, cfg: Optional[Config] = None) -> dict[int, str]:
+    matches = _filter_implausible_jumps(text, list(_SLOT_MARKER_PATTERN.finditer(text)))
 
     if len(matches) < 2:
         # A lone "1." is still trustworthy -- "only one value, but numbered
@@ -203,22 +329,34 @@ def _numbered_parse(text: str) -> dict[int, str]:
             slot_num = max(slots.keys()) + 1
         slots[slot_num] = value
 
-    return _recover_embedded_orphans(slots)
+    return _recover_embedded_orphans(slots, cfg)
 
 
-def _recover_embedded_orphans(slots: dict[int, str]) -> dict[int, str]:
-    """A marker missing its delimiter mid-sequence ("5 Name" instead of "5.
-    Name") gets swallowed whole into the *previous* recognized slot's text.
-    Split it back out when a "\\n<digit> <content>" tail appears inside a
-    slot's own text AND that digit plausibly fills the gap strictly between
-    this slot and whatever's claimed next.
+def _recover_embedded_orphans(slots: dict[int, str], cfg: Optional[Config] = None) -> dict[int, str]:
+    """A marker that never got recognized primarily -- either its delimiter
+    is missing entirely ("5 Name" instead of "5. Name") or it has a
+    delimiter but sits right after stray punctuation instead of whitespace
+    ("...Reguler .2.Reguler") -- gets swallowed whole into the *previous*
+    recognized slot's text. Split it back out when either shape appears
+    inside a slot's own text AND the digit plausibly fills the gap strictly
+    between this slot and whatever's claimed next.
 
-    Deliberately requires a next-claimed slot to bound against: without an
-    upper bound, the *last* slot's text has no natural ceiling, and a
-    multi-line address ending in something like "...\\n5 Main Street" could
-    misfire with nothing to constrain it. That means a dropped delimiter on
-    the true final item is a known gap this can't recover -- an acceptable
-    trade against silently corrupting address-like free text.
+    Two (or more) dropped delimiters can appear back to back ("...4. Vikram
+    . \\n 5 Vikram \\n 6 Narendra7. Yogesh...", real client data) -- slot 4's
+    span swallows *both* orphans, so recovery has to keep re-scanning its
+    own leftover tail rather than stopping after the first hit, or the
+    second name stays glued onto the first (failing validation) and the
+    slot it belongs in is never created at all.
+
+    Normally requires a next-claimed slot to bound against: without an upper
+    bound, the *last* slot's text has no natural ceiling, and a multi-line
+    address ending in something like "...\\n5 Main Street" could misfire with
+    nothing to constrain it. The one exception is when the recovered tail is
+    itself a recognized non-answer phrase ("...\\n8 Not Assigned") -- real
+    prose/address text never happens to end that way, so it's safe to trust
+    even without a next marker to bound against. Otherwise a dropped
+    delimiter on the true final item stays an unrecoverable gap, to avoid
+    silently corrupting address-like free text.
     """
     if not slots:
         return slots
@@ -228,23 +366,29 @@ def _recover_embedded_orphans(slots: dict[int, str]) -> dict[int, str]:
 
     for idx, host_slot in enumerate(claimed):
         next_claimed = claimed[idx + 1] if idx + 1 < len(claimed) else None
-        if next_claimed is None:
-            continue
+        current_slot = host_slot
 
-        match = _ORPHANED_EMBEDDED_MARKER.search(result[host_slot])
-        if not match:
-            continue
+        while True:
+            match = _find_next_orphan_match(result[current_slot])
+            if not match:
+                break
 
-        candidate = int(match.group(1))
-        if not (host_slot < candidate < next_claimed):
-            continue
+            candidate = int(match.group(1))
+            recovered = result[current_slot][match.end():].strip()
 
-        recovered = result[host_slot][match.end():].strip()
-        if not recovered:
-            continue
+            if next_claimed is not None:
+                if not (current_slot < candidate < next_claimed):
+                    break
+            else:
+                if candidate <= current_slot or cfg is None or not _is_na_token(recovered, cfg):
+                    break
 
-        result[host_slot] = result[host_slot][: match.start()].strip()
-        result[candidate] = recovered
+            if not recovered:
+                break
+
+            result[current_slot] = result[current_slot][: match.start()].strip()
+            result[candidate] = recovered
+            current_slot = candidate
 
     return result
 
@@ -282,7 +426,7 @@ def _parse_slotted_cell(normalized: str, spec: ColumnSpec, cfg: Config) -> SlotP
     if spec.scaffold_raw is not None and normalized == spec.scaffold_raw.strip():
         return SlotParseResult(is_na=False, is_unfilled_scaffold=True)
 
-    raw_slots = _numbered_parse(normalized)
+    raw_slots = _numbered_parse(normalized, cfg)
     if not raw_slots:
         raw_slots = _positional_fallback(normalized, spec)
 

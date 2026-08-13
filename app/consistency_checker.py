@@ -1,6 +1,6 @@
 """Per-row assembly: N from column H, per-column CellResults (with
-missing_slots), row-level status/completeness, and cross-column
-ConsistencyFindings (J date chain, J window coverage, L duplicate phones).
+missing_slots), row-level status/completeness, and the one remaining
+cross-column ConsistencyFinding (slot count vs. declared agency count).
 BUILD_PLAN.md v2 Section 7 Phase F.
 
 Cell-level status (Section 5.1) and row-level status (Section 5.2) are
@@ -13,14 +13,15 @@ at a time.
 
 from __future__ import annotations
 
-from datetime import date
+import re
 from typing import Optional
 
 from app.config import Config
+from app.excel_reader import CellRecord
 from app.models import CellResult, ConsistencyFinding, RowResult, Status
 from app.response_parser import ParsedCell, parse_row_cells
 from app.row_matcher import RowMatch
-from app.template_spec import CONTRACT_WINDOW, SHEET_NAME, get_column, input_columns, slotted_columns
+from app.template_spec import SHEET_NAME, get_column, input_columns, slotted_columns
 
 # Worst-to-best isn't a strict total order in the spec, so this is a
 # judgment call: INVALID (actively wrong data) is worse than MISSING
@@ -37,6 +38,20 @@ STATUS_SEVERITY: dict[Status, int] = {
 }
 
 _SLOTTED_NON_ANCHOR = [c.letter for c in slotted_columns() if c.letter != "H"]
+
+# AE/IE (Supervision Consultant, Team Leader) and HTMS/Toll Expert don't
+# necessarily have one real answer per declared agency -- a single
+# consultant can legitimately span several agency-contract periods for the
+# same plaza. Comparing their slot count against the agency count (like
+# every other slotted column) produced false "partial" verdicts. These
+# three are graded as a group instead (see aeie_htms_group_status), not
+# folded into the per-agency quantity check the remaining slotted columns
+# still use. Exported (no leading underscore) because report_generator
+# also needs it, to keep the Status sheet's remark in sync with what
+# actually drives the row status instead of re-deriving its own notion of
+# "AE/IE/HTMS has a problem".
+AEIE_HTMS_COLUMNS = ("N", "O", "P")
+_QUANTITY_CHECKED_COLUMNS = [c for c in _SLOTTED_NON_ANCHOR if c not in AEIE_HTMS_COLUMNS]
 
 
 def _compute_n(h_parsed: ParsedCell) -> int:
@@ -139,88 +154,18 @@ def _build_cell_result(column_letter: str, response_row: Optional[int], parsed: 
     )
 
 
-def _parse_date_pair(normalized: str) -> tuple[date, date]:
-    start_str, end_str = normalized.split("/")
-    return date.fromisoformat(start_str), date.fromisoformat(end_str)
-
-
-def _check_date_chain(j_result: CellResult) -> list[ConsistencyFinding]:
-    ranges = [
-        (sv.slot, *_parse_date_pair(sv.verdict.normalized))
-        for sv in j_result.slot_values
-        if sv.verdict.is_valid and sv.verdict.normalized
-    ]
-    if len(ranges) < 2:
-        return []
-
-    ranges.sort(key=lambda r: r[1])  # order by start date
-    findings: list[ConsistencyFinding] = []
-    for (slot_a, _, end_a), (slot_b, start_b, _) in zip(ranges, ranges[1:]):
-        gap_days = (start_b - end_a).days
-        if abs(gap_days) > 1:
-            findings.append(
-                ConsistencyFinding(
-                    kind="date_chain_gap" if gap_days > 0 else "date_chain_overlap",
-                    column="J",
-                    severity=Status.REVIEW,
-                    message=(
-                        f"contract chain: {abs(gap_days)} day "
-                        f"{'gap' if gap_days > 0 else 'overlap'} between slot {slot_a} "
-                        f"(ends {end_a.isoformat()}) and slot {slot_b} (starts {start_b.isoformat()})"
-                    ),
-                )
-            )
-    return findings
-
-
-def _check_window_coverage(j_result: CellResult) -> list[ConsistencyFinding]:
-    ranges = [
-        _parse_date_pair(sv.verdict.normalized)
-        for sv in j_result.slot_values
-        if sv.verdict.is_valid and sv.verdict.normalized
-    ]
-    if not ranges:
-        return []
-
-    window_start, window_end = CONTRACT_WINDOW
-    earliest_start = min(r[0] for r in ranges)
-    latest_end = max(r[1] for r in ranges)
-
-    findings: list[ConsistencyFinding] = []
-    if earliest_start > window_start:
-        findings.append(
-            ConsistencyFinding(
-                kind="date_window_coverage", column="J", severity=Status.REVIEW,
-                message=f"contract coverage starts {earliest_start.isoformat()}, expected from {window_start.isoformat()}",
-            )
-        )
-    if latest_end < window_end:
-        findings.append(
-            ConsistencyFinding(
-                kind="date_window_coverage", column="J", severity=Status.REVIEW,
-                message=f"contract coverage ends {latest_end.isoformat()}, expected through {window_end.isoformat()}",
-            )
-        )
-    return findings
-
-
-def _check_duplicate_phones(l_result: CellResult) -> list[ConsistencyFinding]:
-    valid_values = [sv.verdict.normalized for sv in l_result.slot_values if sv.verdict.is_valid and sv.verdict.normalized]
-    if len(valid_values) >= 2 and len(set(valid_values)) == 1:
-        return [
-            ConsistencyFinding(
-                kind="duplicate_phone", column="L", severity=Status.REVIEW,
-                message=f"same phone number used for all {len(valid_values)} agencies",
-            )
-        ]
-    return []
-
-
 def _check_consistency(per_column: dict[str, CellResult], n: int) -> list[ConsistencyFinding]:
+    """Only the quantity check remains: does each of the 8 core columns
+    (_QUANTITY_CHECKED_COLUMNS) have as many valid entries as agencies
+    declared. Date-chain gap/overlap, date-window coverage, and
+    duplicate-phone were deliberately removed at the user's request --
+    kept the tool simple rather than layering on cross-column judgment
+    calls beyond "does the count match".
+    """
     findings: list[ConsistencyFinding] = []
 
     if n > 0:
-        for letter in _SLOTTED_NON_ANCHOR:
+        for letter in _QUANTITY_CHECKED_COLUMNS:
             cell = per_column[letter]
             # NOT_APPLICABLE means the client explicitly said this column
             # doesn't apply -- that's not the same finding as "forgot to
@@ -235,17 +180,32 @@ def _check_consistency(per_column: dict[str, CellResult], n: int) -> list[Consis
                     )
                 )
 
-    findings.extend(_check_date_chain(per_column["J"]))
-    findings.extend(_check_window_coverage(per_column["J"]))
-    findings.extend(_check_duplicate_phones(per_column["L"]))
-
     return findings
+
+
+def aeie_htms_group_status(per_column: dict[str, CellResult]) -> Status:
+    """Group verdict for N/O/P (see AEIE_HTMS_COLUMNS): "has real data"
+    means at least one valid value, not necessarily as many as there are
+    agencies. All three answered -> COMPLETE. Some but not all -> PARTIAL.
+    All three are blank/NA -> MISSING (incomplete data), same wording as
+    the rest of the tool's "no free passes on a non-answer" rule.
+    """
+    answered = sum(1 for c in AEIE_HTMS_COLUMNS if per_column[c].valid_count > 0)
+    if answered == len(AEIE_HTMS_COLUMNS):
+        return Status.COMPLETE
+    if answered == 0:
+        return Status.MISSING
+    return Status.PARTIAL
 
 
 def _row_status(
     per_column: dict[str, CellResult], identity_mismatches: list[str], findings: list[ConsistencyFinding]
 ) -> Status:
-    candidates = [max(per_column.values(), key=lambda r: STATUS_SEVERITY[r.status]).status]
+    core_columns = [cell for letter, cell in per_column.items() if letter not in AEIE_HTMS_COLUMNS]
+    candidates = [
+        max(core_columns, key=lambda r: STATUS_SEVERITY[r.status]).status,
+        aeie_htms_group_status(per_column),
+    ]
     if identity_mismatches:
         candidates.append(Status.REVIEW)
     if findings:
@@ -265,7 +225,34 @@ def _row_completeness(per_column: dict[str, CellResult], n: int) -> Optional[flo
     return total_valid / denominator if denominator > 0 else None
 
 
-def check_row(row_index: dict[tuple[int, int], object], row_match: RowMatch, cfg: Config) -> RowResult:
+_MERGE_ANCHOR_ROW = re.compile(r"(\d+)$")
+
+
+def _find_merged_with_rows(row_index: dict[tuple[int, int], CellRecord], response_row: Optional[int]) -> tuple[int, ...]:
+    """Other response-workbook row numbers this row's INPUT columns are
+    merged-cell-linked to -- e.g. two adjoining toll plazas where the PIU
+    filled in agency/contract/manager details once, in an Excel merge
+    spanning both rows, rather than repeating the same answer twice.
+    """
+    if response_row is None:
+        return ()
+
+    other_rows: set[int] = set()
+    for spec in input_columns():
+        record = row_index.get((response_row, spec.index))
+        if record is None or not record.is_merged or record.merge_anchor is None:
+            continue
+        match = _MERGE_ANCHOR_ROW.search(record.merge_anchor)
+        if not match:
+            continue
+        anchor_row = int(match.group(1))
+        if anchor_row != response_row:
+            other_rows.add(anchor_row)
+
+    return tuple(sorted(other_rows))
+
+
+def check_row(row_index: dict[tuple[int, int], CellRecord], row_match: RowMatch, cfg: Config) -> RowResult:
     parsed_cells = parse_row_cells(row_index, row_match.response_row, cfg)
     n = _compute_n(parsed_cells["H"])
 
@@ -277,6 +264,7 @@ def check_row(row_index: dict[tuple[int, int], object], row_match: RowMatch, cfg
     findings = _check_consistency(per_column, n)
     status = _row_status(per_column, row_match.identity_mismatches, findings)
     completeness = _row_completeness(per_column, n)
+    merged_with_rows = _find_merged_with_rows(row_index, row_match.response_row)
 
     return RowResult(
         sheet=SHEET_NAME,
@@ -292,5 +280,6 @@ def check_row(row_index: dict[tuple[int, int], object], row_match: RowMatch, cfg
         consistency_findings=findings,
         status=status,
         completeness=completeness,
+        merged_with_rows=merged_with_rows,
         identity_mismatches=row_match.identity_mismatches,
     )

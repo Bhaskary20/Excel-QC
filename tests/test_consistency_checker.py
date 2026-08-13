@@ -1,19 +1,22 @@
 """Phase F gate (consistency_checker half): the Section 2.4 worked example
 reproduced exactly, N-from-H computation, the cell status rules (Section
-5.1), row status/completeness (Section 5.2), and the 3 cross-column checks
-(slot count mismatch, J date chain, J window coverage, L duplicate phones).
+5.1), row status/completeness (Section 5.2), and the one remaining
+cross-column check (slot count mismatch). Date chain/window coverage and
+duplicate-phone checks were removed at the user's request -- kept simple.
 """
+
+import dataclasses
 
 import pytest
 
 import app.validators  # noqa: F401 -- real validators, not the placeholder
 from app.config import load_config
-from app.consistency_checker import _decide_cell, check_row
+from app.consistency_checker import _decide_cell, _find_merged_with_rows, check_row
 from app.excel_reader import CellRecord
 from app.models import Status
 from app.response_parser import build_row_index
 from app.row_matcher import RowMatch
-from app.template_spec import SHEET_NAME
+from app.template_spec import SHEET_NAME, get_column
 
 
 @pytest.fixture(scope="module")
@@ -117,12 +120,14 @@ def test_n_is_zero_when_h_is_na(cfg):
     assert result.n_contracts == 0
 
 
-def test_n_counts_detected_slots_not_just_valid_ones(cfg):
-    # slot 2 is garbage (no letters) -- still "declared", so N=3, not 2.
+def test_n_counts_all_declared_slots(cfg):
+    # slot 2 ("12", no letters) is still "declared" -- N=3. H is
+    # presence-only now, so it's actually valid too, but N (agency count)
+    # was always meant to count declared slots, not filter by validity.
     result = _check(15, {"H": "1. Agency One\n2. 12\n3. Agency Three"}, cfg)
     assert result.n_contracts == 3
-    assert result.per_column["H"].valid_count == 2
-    assert result.per_column["H"].invalid_count == 1
+    assert result.per_column["H"].valid_count == 3
+    assert result.per_column["H"].invalid_count == 0
 
 
 # ============================================================================
@@ -216,19 +221,25 @@ def test_per_slot_all_not_assigned_reads_as_missing_not_not_applicable(cfg):
     assert p_result.valid_count == 0
 
 
-def test_all_invalid_is_invalid_status(cfg):
-    result = _check(15, {"L": "1. abc\n2. def\n3. ghi\n4. jkl"}, cfg)
-    assert result.per_column["L"].status == Status.INVALID
-    assert result.per_column["L"].completeness == 0.0
+def test_all_invalid_is_invalid_status():
+    # L/K/H etc. are all presence-only now (no real content can fail their
+    # validators), so this exercises _decide_cell directly rather than
+    # through a column whose real validator can no longer produce INVALID.
+    status, completeness, _ = _decide_cell(
+        expected_count=4, detected=4, valid=0, is_blank=False, is_na=False,
+        required=True, missing_slots=[],
+    )
+    assert status == Status.INVALID
+    assert completeness == 0.0
 
 
-def test_partial_valid_is_partial_status(cfg):
-    result = _check(15, {"L": "1. 9876543210\n2. abc\n3. 9876543212\n4. abc"}, cfg)
-    l_result = result.per_column["L"]
-    assert l_result.status == Status.PARTIAL
-    assert l_result.valid_count == 2
-    assert l_result.invalid_count == 2
-    assert l_result.completeness == pytest.approx(0.5)
+def test_partial_valid_is_partial_status():
+    status, completeness, _ = _decide_cell(
+        expected_count=4, detected=4, valid=2, is_blank=False, is_na=False,
+        required=True, missing_slots=[2, 4],
+    )
+    assert status == Status.PARTIAL
+    assert completeness == pytest.approx(0.5)
 
 
 def test_decide_cell_defensive_review_fallback_never_crashes():
@@ -247,7 +258,9 @@ def test_decide_cell_defensive_review_fallback_never_crashes():
 
 
 def test_row_status_is_worst_cell_status(cfg):
-    result = _check(15, {"L": "1. abc\n2. def\n3. ghi\n4. jkl"}, cfg)  # L becomes INVALID
+    # G is the only column left whose real validator can still produce
+    # INVALID from ordinary content (L/K/H etc. are presence-only now).
+    result = _check(15, {"G": "Nonsense Type"}, cfg)
     assert result.status == Status.INVALID
 
 
@@ -257,10 +270,10 @@ def test_row_status_escalates_to_review_on_identity_mismatch(cfg):
 
 
 def test_row_status_stays_worse_than_review_if_already_worse(cfg):
-    # L is INVALID (more severe than REVIEW) -- an identity mismatch on top
+    # G is INVALID (more severe than REVIEW) -- an identity mismatch on top
     # shouldn't *downgrade* the row status back to REVIEW.
     result = _check(
-        15, {"L": "1. abc\n2. def\n3. ghi\n4. jkl"}, cfg,
+        15, {"G": "Nonsense Type"}, cfg,
         identity_mismatches=["Plaza Name: expected 'SEHATGANJ', got 'X'"],
     )
     assert result.status == Status.INVALID
@@ -283,12 +296,52 @@ def test_row_status_review_from_finding_does_not_downgrade_worse_cell_status(cfg
     # finding elsewhere must not pull the row status back down to REVIEW.
     result = _check(
         15,
-        {"K": "1. 123\n2. 456\n3. 789\n4. 000", "L": "9876543210\n9876543211"},
+        {"G": "Nonsense Type", "L": "9876543210\n9876543211"},  # G invalid, L short (2 of 4)
         cfg,
     )
-    assert result.per_column["K"].status == Status.INVALID
+    assert result.per_column["G"].status == Status.INVALID
     assert any(f.kind == "slot_count_mismatch" for f in result.consistency_findings)
     assert result.status == Status.INVALID
+
+
+# ============================================================================
+# AE/IE + HTMS (N/O/P) group status: not compared to agency count, graded
+# as a group instead -- 1-2 of 3 answered is PARTIAL, none answered is
+# MISSING (incomplete data), all 3 answered is COMPLETE regardless of how
+# many of the N agencies each one covers.
+# ============================================================================
+
+
+def test_aeie_htms_shortfall_no_longer_blocks_full_completion(cfg):
+    # Each of N/O/P has only 1 of 4 slots filled -- a real answer, just not
+    # one per agency. That alone must no longer prevent the row from being
+    # COMPLETE, since a single AE/IE consultant can legitimately cover
+    # several agency-contract periods.
+    result = _check(15, {"N": "Consultant A", "O": "Team Lead A", "P": "HTMS A"}, cfg)
+    assert result.per_column["N"].status == Status.PARTIAL  # per-column detail still shows the shortfall
+    assert not any(f.column in ("N", "O", "P") for f in result.consistency_findings)
+    assert result.status == Status.COMPLETE
+
+
+def test_aeie_htms_all_three_blank_is_missing(cfg):
+    # Whole-cell non-answers on all three -- no real data anywhere in the
+    # group -- must read as incomplete data (MISSING), not a free pass.
+    result = _check(15, {"N": "NA", "O": "Not Assigned", "P": "N/A"}, cfg)
+    assert result.per_column["N"].status == Status.MISSING
+    assert result.status == Status.MISSING
+
+
+def test_aeie_htms_some_answered_some_blank_is_partial(cfg):
+    # N has real data, O and P don't -- 1 of 3 answered -> PARTIAL, not
+    # dragged all the way down to MISSING just because two of three are blank.
+    result = _check(15, {"O": "NA", "P": "NA"}, cfg)
+    assert result.status == Status.PARTIAL
+
+
+def test_aeie_htms_never_produces_slot_count_mismatch_finding(cfg):
+    result = _check(15, {"N": "Consultant A", "O": "NA", "P": "NA"}, cfg)
+    findings = [f for f in result.consistency_findings if f.kind == "slot_count_mismatch"]
+    assert all(f.column not in ("N", "O", "P") for f in findings)
 
 
 # ============================================================================
@@ -362,72 +415,56 @@ def test_no_slot_count_mismatch_when_optional_column_is_explicitly_na(cfg):
 
 
 # ============================================================================
-# Consistency findings: date chain continuity
+# merged_with_rows: two adjoining plazas sharing one merged-cell answer
+# (real client data, tests/UPSTF Case 13.08.2026.xlsx: KUCCHADI/OKHAMADI
+# have G..P and S merged across both rows, F/Q/R filled independently)
 # ============================================================================
 
 
-def test_date_chain_gap_detected(cfg):
-    # Gap between slot 1 end (10/11/2021) and slot 2 start (01/01/2022).
-    result = _check(15, {"J": "1. 10/08/2021 - 10/11/2021\n2. 01/01/2022 - 14/01/2026"}, cfg)
-    findings = [f for f in result.consistency_findings if f.kind == "date_chain_gap"]
-    assert len(findings) == 1
-    assert "slot 1" in findings[0].message and "slot 2" in findings[0].message
+def test_find_merged_with_rows_detects_cross_row_merge(cfg):
+    anchor_row, merged_row = 34, 35
+    h_index = get_column("H").index
+    f_index = get_column("F").index
+
+    anchor_h = dataclasses.replace(_cell(anchor_row, h_index, "1. Agency One"), is_merged=True, merge_anchor=f"H{anchor_row}")
+    merged_h = dataclasses.replace(_cell(merged_row, h_index, "1. Agency One"), is_merged=True, merge_anchor=f"H{anchor_row}")
+    merged_f = _cell(merged_row, f_index, "Some Village")  # independent per-row value, not merged
+
+    row_index = {
+        (anchor_row, h_index): anchor_h,
+        (merged_row, h_index): merged_h,
+        (merged_row, f_index): merged_f,
+    }
+    assert _find_merged_with_rows(row_index, merged_row) == (anchor_row,)
+    # The anchor row's own cell points at itself -- that's not "merged with
+    # another row", so the anchor must not report a link to itself.
+    assert _find_merged_with_rows(row_index, anchor_row) == ()
 
 
-def test_date_chain_no_gap_within_tolerance(cfg):
-    # Contiguous chain (end of one = start of next) should have zero findings.
-    result = _check(
-        15,
-        {"J": "1. 10/08/2021 - 10/11/2021\n2. 10/11/2021 - 10/11/2022\n3. 10/11/2022 - 10/02/2023\n4. 10/02/2023 - 14/01/2026"},
-        cfg,
-    )
-    findings = [f for f in result.consistency_findings if "date_chain" in f.kind]
-    assert findings == []
-
-
-def test_date_chain_overlap_detected(cfg):
-    # Slot 2 starts before slot 1 ends.
-    result = _check(15, {"J": "1. 10/08/2021 - 10/11/2021\n2. 01/10/2021 - 14/01/2026"}, cfg)
-    findings = [f for f in result.consistency_findings if f.kind == "date_chain_overlap"]
-    assert len(findings) == 1
-
-
-# ============================================================================
-# Consistency findings: window coverage
-# ============================================================================
-
-
-def test_window_coverage_gap_at_start_detected(cfg):
-    result = _check(15, {"J": "1. 01/06/2021 - 14/01/2026"}, cfg)
-    findings = [f for f in result.consistency_findings if f.kind == "date_window_coverage"]
-    assert any("starts" in f.message for f in findings)
-
-
-def test_window_coverage_gap_at_end_detected(cfg):
-    result = _check(15, {"J": "1. 01/01/2021 - 01/06/2023"}, cfg)
-    findings = [f for f in result.consistency_findings if f.kind == "date_window_coverage"]
-    assert any("ends" in f.message for f in findings)
-
-
-def test_window_fully_covered_has_no_finding(cfg):
-    result = _check(15, {"J": "1. 01/01/2021 - 14/01/2026"}, cfg)
-    findings = [f for f in result.consistency_findings if f.kind == "date_window_coverage"]
-    assert findings == []
-
-
-# ============================================================================
-# Consistency findings: duplicate phones
-# ============================================================================
-
-
-def test_duplicate_phone_across_all_agencies_flagged(cfg):
-    result = _check(15, {"L": "1. 9876543210\n2. 9876543210\n3. 9876543210\n4. 9876543210"}, cfg)
-    findings = [f for f in result.consistency_findings if f.kind == "duplicate_phone"]
-    assert len(findings) == 1
-    assert findings[0].column == "L"
-
-
-def test_distinct_phones_not_flagged_as_duplicate(cfg):
+def test_find_merged_with_rows_empty_when_nothing_merged(cfg):
     result = _check(15, None, cfg)
-    findings = [f for f in result.consistency_findings if f.kind == "duplicate_phone"]
-    assert findings == []
+    assert result.merged_with_rows == ()
+
+
+def test_check_row_populates_merged_with_rows_end_to_end(cfg):
+    anchor_row, merged_row = 34, 35
+    independent_columns = {"F", "Q", "R"}  # filled per-plaza, not merged, same as real data
+
+    cells = []
+    for letter, text in _FULL_ROW_DEFAULTS.items():
+        if letter in ("A", "B", "C", "D", "E"):
+            continue  # KEY columns aren't part of merged_with_rows detection
+        col = _COLUMN_LETTER_TO_INDEX[letter]
+        cell = _cell(merged_row, col, text)
+        if letter not in independent_columns:
+            cell = dataclasses.replace(cell, is_merged=True, merge_anchor=f"{letter}{anchor_row}")
+        cells.append(cell)
+
+    row_index = build_row_index(cells, SHEET_NAME)
+    row_match = RowMatch(
+        template_s_no=14, template_plaza_code="336009", template_plaza_name="OKHAMADI",
+        template_ro="Gujarat", template_piu="Rajkot", response_row=merged_row, match_strategy="s_no",
+        identity_mismatches=[],
+    )
+    result = check_row(row_index, row_match, cfg)
+    assert result.merged_with_rows == (anchor_row,)

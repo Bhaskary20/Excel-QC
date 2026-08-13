@@ -152,6 +152,74 @@ def test_dot_formatted_dates_with_time_suffix_not_shredded(cfg):
     }
 
 
+def test_decimal_number_with_two_digit_integer_part_not_shredded(cfg):
+    # Real client data (DAULATPURA, column R): a decimal traffic figure
+    # ("91.65") whose integer part is exactly 1-2 digits is shaped
+    # identically to a zero-space marker ("91." then "65" as content) --
+    # not date-shaped (no further "." or "/" inside "65"), so this needs
+    # the sequence-plausibility check (_filter_implausible_jumps), not the
+    # date-continuation guard, to reject the jump from "4" to "91".
+    text = "1. 272.25\n2. 196.2\n3. 110.7\n4. 91.65\n5. 92.7\n6. 141.6\n7. 190.95\n8.156\n"
+    result = parse_slots(text, "R", cfg)
+    assert result.slots == {
+        1: "272.25", 2: "196.2", 3: "110.7", 4: "91.65",
+        5: "92.7", 6: "141.6", 7: "190.95", 8: "156",
+    }
+
+
+def test_zero_space_final_marker_with_numeric_content_still_recognized(cfg):
+    # The last entry above ("8.156", no space after the delimiter) must
+    # still be trusted as marker 8 -- it's a *plausible* continuation of
+    # the sequence 1..7, unlike "91." after "4.", so the jump-plausibility
+    # check accepts it even though its content happens to be numeric.
+    result = parse_slots("1. 100\n2. 200\n3.300", "Q", cfg)
+    assert result.slots == {1: "100", 2: "200", 3: "300"}
+
+
+def test_house_number_with_hyphen_not_misread_as_marker(cfg):
+    # Real client data (PANDILLAPALLI, column M): "# 46-738 Budhwarpet"
+    # inside slot 6's own address text -- "46-" is zero-space and not
+    # date-shaped, so only the jump check (46 is nowhere near the
+    # established count of 6) keeps it from splitting off as a bogus slot.
+    text = (
+        "1. Venugopal Nagar, Ananthapur\n2. Pandillapalli Village\n"
+        "3. 603, Jackson Crowne Heights\n4. Plot No.74, Orderly Bazar\n"
+        "5. G-134, Preet Vihar\n6. # 46-738 Budhwarpet, Kurnool"
+    )
+    result = parse_slots(text, "M", cfg)
+    assert result.slots[6] == "# 46-738 Budhwarpet, Kurnool"
+    assert len(result.slots) == 6
+
+
+def test_plot_number_with_space_not_misread_as_marker(cfg):
+    # Real client data (SURJAPUR, column M): "Plot No. - 83. Azad Colony"
+    # -- "83." has a real space after it, exactly like a genuine marker,
+    # so no local shape check can tell them apart. Only the jump from "1"
+    # straight to "83" (with "2." still to come) marks it implausible.
+    text = (
+        "1. Plot No. - 83. Azad Colony, Chotti Mazid, Umred Road, Nagpur\n"
+        "2. 218, Swastik Chambers, Chemur, Mumbai"
+    )
+    result = parse_slots(text, "M", cfg)
+    assert result.slots == {
+        1: "Plot No. - 83. Azad Colony, Chotti Mazid, Umred Road, Nagpur",
+        2: "218, Swastik Chambers, Chemur, Mumbai",
+    }
+
+
+def test_marker_wrapped_in_quotes_still_recognized(cfg):
+    # Real client data (Bhojpuri, column M): each numbered entry pasted in
+    # wrapped in literal quotes ('"1. Ranchor Infra..."'), a paste
+    # artifact. The quote sits directly in front of the marker digit, so
+    # without treating a quote as an acceptable lookbehind (same as
+    # whitespace/comma/semicolon), the marker goes unrecognized entirely
+    # and the whole cell falls back to being split line by line instead.
+    text = '"1. Ranchor Infra Developers"\n"2. M/s Radheshyam Agrawal"\n"3. Coral Associates"'
+    result = parse_slots(text, "H", cfg)
+    assert len(result.slots) == 3
+    assert result.slots[3] == "Coral Associates"
+
+
 # ============================================================================
 # Normalization: NBSP, zero-width chars, \r\n, trailing whitespace
 # ============================================================================
@@ -338,6 +406,14 @@ def test_trailing_separator_punctuation_stripped(cfg):
     assert result.slots == {1: "Rahul Sharma", 2: "Amit Kumar"}
 
 
+def test_leading_backtick_stripped_like_a_stray_quote(cfg):
+    # Real client data (tests/UPSTF Case 13.08.2026.xlsx, MORATANDI): a
+    # zero-space marker left a stray backtick stuck to the name ("3.`Himanshu"),
+    # which used to fail NAME validation outright over one typo'd character.
+    result = parse_slots("1. Ramakrishna\n2.`Himanshu\n3. Sundar", "K", cfg)
+    assert result.slots == {1: "Ramakrishna", 2: "Himanshu", 3: "Sundar"}
+
+
 # ============================================================================
 # Orphaned marker recovery -- found via real client data: a numbered list
 # where one item's delimiter was dropped ("1 Agency" instead of "1. Agency")
@@ -361,6 +437,22 @@ def test_embedded_orphan_recovered_from_previous_slot(cfg):
     }
 
 
+def test_two_consecutive_embedded_orphans_both_recovered(cfg):
+    # Real client data (tests/UPSTF Case 13.08.2026.xlsx, LIMDI): two names
+    # in a row both drop their delimiter ("...4. Vikram . \n 5 Vikram \n 6
+    # Narendra7. Yogesh..."), so slot 4's captured span swallows *both*
+    # orphans. Recovery must keep re-scanning its own leftover tail, not
+    # stop after the first hit -- otherwise "Narendra" stays glued onto
+    # "Vikram" (failing NAME validation over the stray "6") and slot 6 is
+    # never created.
+    text = "1. amit\n2. RAVI\n3. Chandan\n4. Vikram . \n 5 Vikram \n 6   Narendra                7.Yogesh Singh\n8.Jitendra Jaat"
+    result = parse_slots(text, "K", cfg)
+    assert result.slots == {
+        1: "amit", 2: "RAVI", 3: "Chandan", 4: "Vikram", 5: "Vikram",
+        6: "Narendra", 7: "Yogesh Singh", 8: "Jitendra Jaat",
+    }
+
+
 def test_embedded_orphan_recovery_requires_a_bounding_next_slot(cfg):
     # Last slot has no "next" to bound a candidate against -- a multi-line
     # address ending in something that starts with a digit must stay whole
@@ -373,12 +465,66 @@ def test_embedded_orphan_recovery_requires_a_bounding_next_slot(cfg):
     }
 
 
+def test_marker_after_stray_punctuation_recovered(cfg):
+    # Real client data (tests/UPSTF Case 13.08.2026.xlsx, THIRPALIBADI
+    # column I): a well-formed "2." marker sits right after a stray "."
+    # instead of whitespace, so the primary marker regex's lookbehind
+    # doesn't recognize it and the whole second value gets swallowed into
+    # slot 1's text.
+    text = "1.Reguler          .2.Reguler\n 3.  EQ\n 4.Regular"
+    result = parse_slots(text, "I", cfg)
+    assert result.slots == {1: "Reguler", 2: "Reguler", 3: "EQ", 4: "Regular"}
+
+
+def test_stray_char_marker_shape_rejected_outside_the_gap_range(cfg):
+    # A stray-punctuation-preceded digit+delimiter shape alone isn't rare
+    # enough to trust blindly (e.g. "No.14-2" inside a room number) -- the
+    # strict host_slot < candidate < next_claimed bound must still reject
+    # an implausible candidate (14 doesn't fit between slot 1 and slot 2)
+    # rather than fabricate a slot.
+    text = "1. Consultant Office, Room No.14-2 Complex\n2. Second Office, Ring Road"
+    result = parse_slots(text, "M", cfg)
+    assert result.slots == {
+        1: "Consultant Office, Room No.14-2 Complex",
+        2: "Second Office, Ring Road",
+    }
+
+
 def test_embedded_orphan_not_recovered_outside_the_gap_range(cfg):
     # "5" here isn't between host_slot(2) and a next claimed slot (there is
     # none) -- must not be split out.
     text = "1. Consultant A\n2. 5 things happened here today in this office"
     result = parse_slots(text, "N", cfg)
     assert result.slots == {1: "Consultant A", 2: "5 things happened here today in this office"}
+
+
+def test_embedded_orphan_recovered_on_last_slot_when_it_is_an_na_token(cfg):
+    # Real client data: "7. Not Assigned\n  8 Not Assigned" -- item 8 is
+    # missing its delimiter, and it's the last item so there's no next
+    # marker to bound against. Unlike free-text ("5 Main Street"), a
+    # recovered tail that's itself a recognized non-answer phrase is safe
+    # to trust even without that bound -- real prose never ends that way.
+    # Every slot here is "Not Assigned", so all 8 drop out as per-slot NA
+    # rather than slot 7 ending up INVALID with a stray "8" stuck in it.
+    text = (
+        "1. Not Assigned\n  2. Not Assigned\n  3.Not Assigned\n  4. Not Assigned\n"
+        "  5.Not Assigned\n  6.Not Assigned\n  7. Not Assigned\n  8 Not Assigned"
+    )
+    result = parse_slots(text, "O", cfg)
+    assert result.slots == {}
+    assert result.is_unfilled_scaffold is True
+
+
+def test_embedded_orphan_on_last_slot_still_requires_na_token(cfg):
+    # Same missing-delimiter shape, but the recovered tail is ordinary
+    # prose, not a non-answer phrase -- must NOT be split out, same as the
+    # bounded case above.
+    text = "1. Consultant Office, Ring Road\n2. House No 5 Main Street, Sample City"
+    result = parse_slots(text, "M", cfg)
+    assert result.slots == {
+        1: "Consultant Office, Ring Road",
+        2: "House No 5 Main Street, Sample City",
+    }
 
 
 # ============================================================================

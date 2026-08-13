@@ -18,8 +18,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from app.config import Config
-from app.consistency_checker import STATUS_SEVERITY
-from app.models import QCRun, RowResult, Status
+from app.consistency_checker import AEIE_HTMS_COLUMNS, STATUS_SEVERITY
+from app.models import CellResult, QCRun, RowResult, Status
 
 _HEADER_FILL = PatternFill(start_color="FF2F5496", end_color="FF2F5496", fill_type="solid")
 _HEADER_FONT = Font(bold=True, color="FFFFFFFF")
@@ -73,32 +73,62 @@ _STATUS_SHEET_HEADERS = ["RO", "Plaza", "PIU", "Status", "Remarks"]
 _NON_ISSUE_STATUSES = {Status.COMPLETE, Status.NOT_APPLICABLE}
 
 # Plain-English field groups for the Status sheet's Remarks column, in
-# template column order. Grouped (13 columns -> 10 labels) to match how
-# NHAI's own reviewers write these up -- e.g. "Details of AE/IE, HTMS /
-# Toll expert" covers N+O+P together in tests/Status UPSTF_*.xlsx -- rather
-# than one entry per raw column, which would read as noise.
+# template column order. K (Name) and L (Contact) are kept as separate
+# entries rather than one combined "Name & Contact..." label -- they're two
+# independent pieces of data, and a real client answer often gets one right
+# but not the other (e.g. tests/UPSTF Case 13.08.2026.xlsx SEHATGANJ: L had
+# a slot with two contact numbers that used to fail phone validation while
+# K was fully correct -- the combined label would misname K as a problem
+# too). Naming only the column that's actually short avoids that.
+#
+# N/O/P (AE/IE, HTMS/Toll Expert) are deliberately absent from this list --
+# they're no longer graded by the same "any column not COMPLETE" rule as
+# the others (see consistency_checker.aeie_htms_group_status), so their
+# remark is built separately in _aeie_htms_remark_fragments and spliced
+# into _build_remarks at the point in the loop where M's entry is
+# appended, to keep template column order (M, then N/O/P, then Q).
+#
+# N and O (Supervision Consultant name, Team Leader name) are two people
+# at the same AE/IE firm, so they're judged together as one "AE/IE" unit.
+# The bar is "at least one of the two is fully covered" (every declared
+# agency has a name), not just "some real data exists" -- found via real
+# client data both ways:
+#   - FULARA: N and P were fully covered, only O was short (2 of 7) --
+#     AE/IE as a whole reads as genuinely covered, flagging it was a false
+#     alarm.
+#   - SEHATGANJ: N and O were each only 2 of 8 -- neither comes close to
+#     full coverage, so "at least one has *some* data" was too generous a
+#     bar; the remark should still name AE/IE here even though it isn't
+#     literally zero.
+# P (HTMS/Toll Expert) is judged on its own, still by "any real data at
+# all" -- there's no second column to lean on the way N and O lean on
+# each other.
+_AEIE_COLUMNS = ("N", "O")
+_HTMS_COLUMN = "P"
+_AEIE_HTMS_REMARK_AFTER = "Address of Toll Agency"
+
+
+def _aeie_htms_remark_fragments(per_column: dict[str, CellResult]) -> list[str]:
+    fragments = []
+    if not any(per_column[c].status == Status.COMPLETE for c in _AEIE_COLUMNS if c in per_column):
+        fragments.append("AE/IE")
+    if _HTMS_COLUMN in per_column and per_column[_HTMS_COLUMN].valid_count == 0:
+        fragments.append("HTMS / Toll expert")
+    return fragments
+
+
 _FIELD_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("Plaza Village / Location details", ("F",)),
     ("Plaza Type", ("G",)),
     ("Agency name", ("H",)),
     ("Contract details (EQ/Regular)", ("I",)),
     ("Contract Start & End dates", ("J",)),
-    ("Name & Contact details of Toll Manager", ("K", "L")),
+    ("Name of Toll Manager", ("K",)),
+    ("Contact details of Toll Manager", ("L",)),
     ("Address of Toll Agency", ("M",)),
-    ("Details of AE/IE, HTMS / Toll expert", ("N", "O", "P")),
     ("Traffic details", ("Q",)),
     ("Traffic details (Exemption)", ("R",)),
 ]
-
-# slot_count_mismatch is deliberately excluded: it's the same gap the
-# field-group labels above already surface, just phrased for internal use.
-_FINDING_KIND_REMARKS: dict[str, str] = {
-    "date_chain_gap": "contract date gap between periods",
-    "date_chain_overlap": "contract date overlap between periods",
-    "date_window_coverage": "contract dates don't cover the full required period",
-    "duplicate_phone": "same phone number used for multiple agencies",
-}
-
 
 def _mask_value(value: str) -> str:
     """'9876543210' -> '98765*****' -- first 5 chars visible, rest masked."""
@@ -152,20 +182,23 @@ def _response_status_label(row: RowResult) -> str:
     return "Partial Response"
 
 
-def _build_remarks(row: RowResult) -> str:
-    parts = [
-        label
-        for label, columns in _FIELD_GROUPS
-        if any(row.per_column[c].status not in _NON_ISSUE_STATUSES for c in columns if c in row.per_column)
-    ]
-
-    for finding in row.consistency_findings:
-        label = _FINDING_KIND_REMARKS.get(finding.kind)
-        if label and label not in parts:
+def _build_remarks(row: RowResult, plaza_names_by_row: dict[int, str]) -> str:
+    parts: list[str] = []
+    for label, columns in _FIELD_GROUPS:
+        if any(row.per_column[c].status not in _NON_ISSUE_STATUSES for c in columns if c in row.per_column):
             parts.append(label)
+        if label == _AEIE_HTMS_REMARK_AFTER and all(c in row.per_column for c in AEIE_HTMS_COLUMNS):
+            fragments = _aeie_htms_remark_fragments(row.per_column)
+            if fragments:
+                parts.append("Details of " + ", ".join(fragments))
 
     if row.identity_mismatches:
         parts.append("identity mismatch: " + "; ".join(row.identity_mismatches))
+
+    if row.merged_with_rows:
+        linked = [plaza_names_by_row[r] for r in row.merged_with_rows if r in plaza_names_by_row]
+        if linked:
+            parts.append("data shared via merged cell with " + ", ".join(linked))
 
     return ", ".join(parts)
 
@@ -188,13 +221,15 @@ def _finalize_sheet(ws: Worksheet, num_cols: int, num_data_rows: int, cfg: Confi
 def _write_status_sheet(ws: Worksheet, run: QCRun, cfg: Config) -> None:
     _write_header_row(ws, _STATUS_SHEET_HEADERS)
 
+    plaza_names_by_row = {r.response_row: r.plaza_name for r in run.rows if r.response_row is not None}
+
     for row_idx, r in enumerate(run.rows, start=2):
         label = _response_status_label(r)
         ws.cell(row=row_idx, column=1, value=r.ro)
         ws.cell(row=row_idx, column=2, value=r.plaza_name)
         ws.cell(row=row_idx, column=3, value=r.piu)
         ws.cell(row=row_idx, column=4, value=label)
-        ws.cell(row=row_idx, column=5, value=_build_remarks(r) or None)
+        ws.cell(row=row_idx, column=5, value=_build_remarks(r, plaza_names_by_row) or None)
 
         _apply_style(ws, row_idx, len(_STATUS_SHEET_HEADERS), _RESPONSE_STATUS_STYLES.get(label))
 
